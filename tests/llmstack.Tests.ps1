@@ -43,7 +43,7 @@ BeforeAll {
   # Everything the block writes to the console (stream 6), plus a THROWN:
   # line when it stops with an error, as one string.
   function Get-Out([scriptblock]$Sb) {
-    & { try { & $Sb } catch { Write-Host "THROWN: $($_.Exception.Message)" } } 6>&1 | Out-String -Width 400
+    & { try { & $Sb } catch { Write-Host "THROWN: $(($_.Exception.Message) -replace '^LLMSTACK: ', '')" } } 6>&1 | Out-String -Width 400
   }
   function Set-Answers([string[]]$A) {
     $Script:Answers = New-Object System.Collections.Generic.Queue[string]
@@ -83,7 +83,8 @@ BeforeEach {
   Mock Get-LlmRegistryVram { $Script:Hw.Vram }
   Mock Get-LlmNvidiaSmi { $Script:Hw.Smi }
   Mock Test-LlmAdmin { $true }
-  Mock Read-LlmAnswer { if ($Script:Answers.Count -gt 0) { $Script:Answers.Dequeue() } else { '' } }
+  # The real prompt prints its question; the mock does too, so tests can see it.
+  Mock Read-LlmAnswer { param([string]$Prompt) Write-Host "$Prompt [y/N]:"; if ($Script:Answers.Count -gt 0) { $Script:Answers.Dequeue() } else { '' } }
 
   Mock Get-LlmHttpStatus {
     param([string]$Url)
@@ -238,12 +239,11 @@ Describe 'Hardware detection and picks' {
     $out | Should -Match 'daily: +gemma4:12b'
     $out | Should -Match 'coding: +qwen3\.5:9b'
   }
-  It 'reads a QWORD VRAM value stored as REG_BINARY' {
-    Mock Get-ChildItem { @([pscustomobject]@{ PSChildName = '0000'; PSPath = 'X' }) } -ParameterFilter { $Path -like '*4d36e968*' }
-    Mock Get-ItemProperty { [pscustomobject]@{ 'HardwareInformation.qwMemorySize' = [BitConverter]::GetBytes([UInt64](8GB)); MatchingDeviceId = 'pci\ven_1002&dev_73df'; DriverDesc = 'AMD Radeon RX 6700 XT' } }
-    $v = @(Get-LlmRegistryVram)
-    $v.Count | Should -Be 1
-    $v[0].Bytes | Should -Be ([double]8GB)
+  It 'reads VRAM stored as QWORD, REG_BINARY or DWORD' {
+    Get-LlmVramBytes ([pscustomobject]@{ 'HardwareInformation.qwMemorySize' = [UInt64](16GB) }) | Should -Be ([double]16GB)
+    Get-LlmVramBytes ([pscustomobject]@{ 'HardwareInformation.qwMemorySize' = [BitConverter]::GetBytes([UInt64](8GB)) }) | Should -Be ([double]8GB)
+    Get-LlmVramBytes ([pscustomobject]@{ 'HardwareInformation.MemorySize' = [BitConverter]::GetBytes([UInt32](2GB)) }) | Should -Be ([double]2GB)
+    Get-LlmVramBytes ([pscustomobject]@{ DriverDesc = 'no size' }) | Should -Be 0
   }
   It 'AMD APU (512 MB carve-out) is integrated and sizes as CPU' {
     Set-Hw -RamGB 32 -Ctl @((New-Ctl 'AMD Radeon(TM) Graphics' '1002')) -Vram @((New-Vram '1002' 512))

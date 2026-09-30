@@ -300,6 +300,11 @@ function Read-LlmTextLines([string]$Path) {
 function Get-LlmDefaultCatalogText {
   $g = $Script:CatalogGeneration
   $d = $Script:CatalogDate
+  # LF only: a checkout with CRLF line endings would otherwise leak CRs.
+  return (Get-LlmDefaultCatalogBody $g $d).Replace("`r`n", "`n")
+}
+
+function Get-LlmDefaultCatalogBody([string]$g, [string]$d) {
   return @"
 # ===========================================================================
 # Model catalogue for llmstack-windows.ps1
@@ -755,6 +760,21 @@ function Get-LlmVideoControllers {
   })
 }
 
+# Memory size from one display class subkey's values. Newer drivers write a
+# QWORD (qwMemorySize); older ones a DWORD or REG_BINARY (MemorySize).
+function Get-LlmVramBytes($Props) {
+  foreach ($name in @('HardwareInformation.qwMemorySize', 'HardwareInformation.MemorySize')) {
+    $prop = $Props.PSObject.Properties[$name]
+    if ($null -eq $prop -or $null -eq $prop.Value) { continue }
+    $v = $prop.Value
+    if ($v -is [byte[]]) {
+      if ($v.Length -ge 8) { $v = [BitConverter]::ToUInt64($v, 0) } elseif ($v.Length -ge 4) { $v = [BitConverter]::ToUInt32($v, 0) } else { $v = 0 }
+    }
+    if ([double]$v -gt 0) { return [double]$v }
+  }
+  return [double]0
+}
+
 # VRAM per display adapter from the display class key. AdapterRAM in CIM is
 # a 32-bit field capped at 4 GB, so it is never used.
 function Get-LlmRegistryVram {
@@ -763,17 +783,7 @@ function Get-LlmRegistryVram {
   foreach ($k in @(Get-ChildItem -Path $class -ErrorAction SilentlyContinue | Where-Object { $_.PSChildName -match '^\d{4}$' })) {
     $p = Get-ItemProperty -Path $k.PSPath -ErrorAction SilentlyContinue
     if ($null -eq $p) { continue }
-    $bytes = [double]0
-    foreach ($name in @('HardwareInformation.qwMemorySize', 'HardwareInformation.MemorySize')) {
-      $prop = $p.PSObject.Properties[$name]
-      if ($null -eq $prop -or $null -eq $prop.Value) { continue }
-      $v = $prop.Value
-      if ($v -is [byte[]]) {
-        if ($v.Length -ge 8) { $v = [BitConverter]::ToUInt64($v, 0) } elseif ($v.Length -ge 4) { $v = [BitConverter]::ToUInt32($v, 0) } else { $v = 0 }
-      }
-      $bytes = [double]$v
-      if ($bytes -gt 0) { break }
-    }
+    $bytes = Get-LlmVramBytes $p
     $mdid = ''; $desc = ''
     if ($p.PSObject.Properties['MatchingDeviceId']) { $mdid = [string]$p.MatchingDeviceId }
     if ($p.PSObject.Properties['DriverDesc']) { $desc = [string]$p.DriverDesc }
