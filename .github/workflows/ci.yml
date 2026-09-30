@@ -72,7 +72,7 @@ jobs:
           Set-PSRepository PSGallery -InstallationPolicy Trusted
           Install-Module PSScriptAnalyzer -RequiredVersion 1.25.0 -Scope CurrentUser -Force
           Import-Module PSScriptAnalyzer -RequiredVersion 1.25.0
-          $r = Invoke-ScriptAnalyzer -Path llmstack-windows.ps1, tests/llmstack.Tests.ps1 -Settings ./PSScriptAnalyzerSettings.psd1
+          $r = @('llmstack-windows.ps1', 'tests/llmstack.Tests.ps1') | ForEach-Object { Invoke-ScriptAnalyzer -Path $_ -Settings ./PSScriptAnalyzerSettings.psd1 }
           $r | ForEach-Object { "::error file=$($_.ScriptName),line=$($_.Line)::$($_.RuleName): $($_.Message)" }
           if ($r) { exit 1 }
           'clean'
@@ -127,9 +127,19 @@ jobs:
           "PowerShell $($PSVersionTable.PSVersion), Pester $((Get-Module Pester).Version)"
           $c = New-PesterConfiguration
           $c.Run.Path = 'tests'
-          $c.Run.Exit = $true
+          $c.Run.PassThru = $true
           $c.Output.Verbosity = 'Detailed'
-          Invoke-Pester -Configuration $c
+          $r = Invoke-Pester -Configuration $c
+          # One single-line annotation per failure, so it shows on the run page.
+          function One([string]$s) { ($s -replace '\s*\r?\n\s*', ' | ').Trim() }
+          foreach ($k in $r.Containers | Where-Object { $_.Result -eq 'Failed' }) {
+            foreach ($e in $k.ErrorRecord) { "::error::container $($k.Item.Name): $(One $e.Exception.Message) @ $(One ($e.ScriptStackTrace -split "`n" | Select-Object -First 2 | Out-String))" }
+          }
+          foreach ($f in $r.Failed) {
+            "::error::$($f.ExpandedPath): $(One $f.ErrorRecord[0].Exception.Message)"
+          }
+          "Passed $($r.PassedCount), failed $($r.FailedCount)"
+          if ($r.Result -ne 'Passed') { exit 1 }
 
       - name: Invoke-Pester (PowerShell 7)
         if: matrix.shell == 'pwsh'
@@ -139,9 +149,19 @@ jobs:
           "PowerShell $($PSVersionTable.PSVersion), Pester $((Get-Module Pester).Version)"
           $c = New-PesterConfiguration
           $c.Run.Path = 'tests'
-          $c.Run.Exit = $true
+          $c.Run.PassThru = $true
           $c.Output.Verbosity = 'Detailed'
-          Invoke-Pester -Configuration $c
+          $r = Invoke-Pester -Configuration $c
+          # One single-line annotation per failure, so it shows on the run page.
+          function One([string]$s) { ($s -replace '\s*\r?\n\s*', ' | ').Trim() }
+          foreach ($k in $r.Containers | Where-Object { $_.Result -eq 'Failed' }) {
+            foreach ($e in $k.ErrorRecord) { "::error::container $($k.Item.Name): $(One $e.Exception.Message) @ $(One ($e.ScriptStackTrace -split "`n" | Select-Object -First 2 | Out-String))" }
+          }
+          foreach ($f in $r.Failed) {
+            "::error::$($f.ExpandedPath): $(One $f.ErrorRecord[0].Exception.Message)"
+          }
+          "Passed $($r.PassedCount), failed $($r.FailedCount)"
+          if ($r.Result -ne 'Passed') { exit 1 }
 
   # ===========================================================================
   # The catalogue: every tag live, rows identical to the Ubuntu release
@@ -192,7 +212,7 @@ jobs:
   # ===========================================================================
   # End to end: a real install, use and uninstall on hosted runners.
   # windows-latest is Windows Server 2025 (LLMSTACK_ALLOW_SERVER=1);
-  # windows-11-arm is real Windows 11 on ARM64. Hosted Windows runners
+  # windows-11-arm is real Windows 11 Enterprise on ARM64. Hosted Windows runners
   # cannot run Linux containers, so SearXNG and Docker Desktop are not
   # exercised here (-NoWebSearch).
   # ===========================================================================
@@ -200,15 +220,10 @@ jobs:
     name: End to end (${{ matrix.runner }})
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 75
-    continue-on-error: ${{ matrix.experimental }}
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - runner: windows-latest
-            experimental: false
-          - runner: windows-11-arm
-            experimental: true
+        runner: [windows-latest, windows-11-arm]
     env:
       LLMSTACK_ALLOW_SERVER: '1'
       MODEL: smollm2:135m
@@ -226,7 +241,13 @@ jobs:
           "$($os.Caption) build $($os.BuildNumber), $env:PROCESSOR_ARCHITECTURE, PowerShell $($PSVersionTable.PSVersion)"
 
       - name: Install
-        run: .\llmstack-windows.ps1 -Yes -Model $env:MODEL -NoWebSearch
+        run: |
+          .\llmstack-windows.ps1 -Yes -Model $env:MODEL -NoWebSearch *>&1 | Tee-Object -FilePath "$env:RUNNER_TEMP\install.log"
+          $rc = $LASTEXITCODE
+          if ($rc -ne 0) {
+            Select-String -Path "$env:RUNNER_TEMP\install.log" -Pattern '^(ERROR|WARNING|       at )' | Select-Object -First 8 | ForEach-Object { "::error::$($_.Line.Trim())" }
+            exit $rc
+          }
 
       - name: Services run at boot under their own virtual accounts
         run: |
@@ -329,10 +350,12 @@ jobs:
         run: |
           Get-ChildItem "$env:ProgramData\llmstack\logs" -ErrorAction SilentlyContinue | ForEach-Object {
             "===== $($_.Name)"; Get-Content $_.FullName -Tail 120
+            # The last lines as annotations, readable on the run page.
+            Get-Content $_.FullName -Tail 4 | Where-Object { $_.Trim() } | ForEach-Object { "::warning::$($_.Trim())" }
           }
 
   # ===========================================================================
-  # Summary job for branch protection (the arm64 run is experimental)
+  # Summary job for branch protection
   # ===========================================================================
   ci-pass:
     name: CI Pass

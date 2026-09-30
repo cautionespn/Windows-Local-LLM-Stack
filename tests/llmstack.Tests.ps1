@@ -58,6 +58,9 @@ BeforeAll {
   function Set-Catalog([string[]]$Lines) { [IO.File]::WriteAllText($Script:CatalogPath, (($Lines -join "`n") + "`n")) }
 }
 
+# Pester allows BeforeEach only inside a block, so one Describe wraps them all.
+Describe 'llmstack-windows.ps1' {
+
 BeforeEach {
   $Script:Opt = $Script:OptDefault.Clone()
   $Script:Cfg = [ordered]@{ WebUIPort = 8080; SearxngMode = 'local'; SearxngUrl = 'http://127.0.0.1:8888'; SearxngPort = 8888 }
@@ -625,3 +628,5 @@ Describe 'Services and secrets' {
     Should -Invoke Save-LlmDownload -Times 0
   }
 }
+
+} # Describe 'llmstack-windows.ps1'
