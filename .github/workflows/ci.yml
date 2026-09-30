@@ -1,0 +1,371 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  # ===========================================================================
+  # Lint: the parser on 5.1 and 7, ASCII only, PSScriptAnalyzer, actionlint
+  # ===========================================================================
+  lint:
+    name: Lint
+    runs-on: windows-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Parse on Windows PowerShell 5.1
+        shell: powershell
+        run: |
+          foreach ($f in @('llmstack-windows.ps1', 'tests\llmstack.Tests.ps1')) {
+            $t = $null; $e = $null
+            [void][System.Management.Automation.Language.Parser]::ParseFile((Resolve-Path $f), [ref]$t, [ref]$e)
+            if ($e.Count) { $e | ForEach-Object { "::error file=$f,line=$($_.Extent.StartLineNumber)::$($_.Message)" }; exit 1 }
+            "$f parses on $($PSVersionTable.PSVersion)"
+          }
+
+      - name: Parse on PowerShell 7
+        shell: pwsh
+        run: |
+          foreach ($f in @('llmstack-windows.ps1', 'tests/llmstack.Tests.ps1')) {
+            $t = $null; $e = $null
+            [void][System.Management.Automation.Language.Parser]::ParseFile((Resolve-Path $f), [ref]$t, [ref]$e)
+            if ($e.Count) { $e | ForEach-Object { "::error file=$f,line=$($_.Extent.StartLineNumber)::$($_.Message)" }; exit 1 }
+            "$f parses on $($PSVersionTable.PSVersion)"
+          }
+
+      - name: ASCII only (5.1 reads BOM-less scripts as ANSI)
+        shell: pwsh
+        run: |
+          $bad = 0
+          foreach ($f in @('llmstack-windows.ps1', 'tests/llmstack.Tests.ps1', 'PSScriptAnalyzerSettings.psd1')) {
+            $i = 0
+            foreach ($line in [IO.File]::ReadAllLines((Resolve-Path $f))) {
+              $i++
+              if ($line -match '[^\x00-\x7F]') { "::error file=$f,line=$i::non-ASCII character"; $bad++ }
+            }
+          }
+          exit $bad
+
+      - name: Version line matches $ScriptVersion
+        shell: pwsh
+        run: |
+          $t = Get-Content llmstack-windows.ps1 -Raw
+          $v = [regex]::Match($t, "\`$Script:ScriptVersion = '([^']+)'").Groups[1].Value
+          if ($t -notmatch [regex]::Escape("llmstack-windows.ps1  v$v")) { "::error::header version does not match $v"; exit 1 }
+          "version $v"
+
+      - name: PSScriptAnalyzer 1.25.0
+        shell: pwsh
+        run: |
+          Set-PSRepository PSGallery -InstallationPolicy Trusted
+          Install-Module PSScriptAnalyzer -RequiredVersion 1.25.0 -Scope CurrentUser -Force
+          Import-Module PSScriptAnalyzer -RequiredVersion 1.25.0
+          $r = @('llmstack-windows.ps1', 'tests/llmstack.Tests.ps1') | ForEach-Object { Invoke-ScriptAnalyzer -Path $_ -Settings ./PSScriptAnalyzerSettings.psd1 }
+          $r | ForEach-Object { "::error file=$($_.ScriptName),line=$($_.Line)::$($_.RuleName): $($_.Message)" }
+          if ($r) { exit 1 }
+          'clean'
+
+  actionlint:
+    name: actionlint
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v5
+      - name: actionlint
+        run: |
+          bash <(curl -fsSL https://raw.githubusercontent.com/rhysd/actionlint/v1.7.7/scripts/download-actionlint.bash) 1.7.7
+          ./actionlint -color
+
+  # ===========================================================================
+  # Unit tests: Pester 6 with every system call mocked, on 5.1 and 7
+  # ===========================================================================
+  unit:
+    name: Unit tests (${{ matrix.shell }})
+    runs-on: windows-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        shell: [powershell, pwsh]
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install Pester 6.2.0 (Windows PowerShell 5.1)
+        if: matrix.shell == 'powershell'
+        shell: powershell
+        run: |
+          [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
+          Install-PackageProvider -Name NuGet -MinimumVersion 2.8.5.201 -Force -Scope CurrentUser | Out-Null
+          Set-PSRepository PSGallery -InstallationPolicy Trusted
+          Install-Module Pester -RequiredVersion 6.2.0 -Scope CurrentUser -Force -SkipPublisherCheck -AllowClobber
+
+      - name: Install Pester 6.2.0 (PowerShell 7)
+        if: matrix.shell == 'pwsh'
+        shell: pwsh
+        run: |
+          Set-PSRepository PSGallery -InstallationPolicy Trusted
+          Install-Module Pester -RequiredVersion 6.2.0 -Scope CurrentUser -Force -SkipPublisherCheck
+
+      # shell cannot come from the matrix, so one step per shell.
+      - name: Invoke-Pester (Windows PowerShell 5.1)
+        if: matrix.shell == 'powershell'
+        shell: powershell
+        run: |
+          Import-Module Pester -RequiredVersion 6.2.0 -Force
+          "PowerShell $($PSVersionTable.PSVersion), Pester $((Get-Module Pester).Version)"
+          $c = New-PesterConfiguration
+          $c.Run.Path = 'tests'
+          $c.Run.PassThru = $true
+          $c.Output.Verbosity = 'Detailed'
+          $r = Invoke-Pester -Configuration $c
+          # One single-line annotation per failure, so it shows on the run page.
+          function One([string]$s) { ($s -replace '\s*\r?\n\s*', ' | ').Trim() }
+          foreach ($k in $r.Containers | Where-Object { $_.Result -eq 'Failed' }) {
+            foreach ($e in $k.ErrorRecord) { "::error::container $($k.Item.Name): $(One $e.Exception.Message) @ $(One ($e.ScriptStackTrace -split "`n" | Select-Object -First 2 | Out-String))" }
+          }
+          foreach ($f in $r.Failed) {
+            "::error::$($f.ExpandedPath): $(One $f.ErrorRecord[0].Exception.Message)"
+          }
+          "Passed $($r.PassedCount), failed $($r.FailedCount)"
+          if ($r.Result -ne 'Passed') { exit 1 }
+
+      - name: Invoke-Pester (PowerShell 7)
+        if: matrix.shell == 'pwsh'
+        shell: pwsh
+        run: |
+          Import-Module Pester -RequiredVersion 6.2.0 -Force
+          "PowerShell $($PSVersionTable.PSVersion), Pester $((Get-Module Pester).Version)"
+          $c = New-PesterConfiguration
+          $c.Run.Path = 'tests'
+          $c.Run.PassThru = $true
+          $c.Output.Verbosity = 'Detailed'
+          $r = Invoke-Pester -Configuration $c
+          # One single-line annotation per failure, so it shows on the run page.
+          function One([string]$s) { ($s -replace '\s*\r?\n\s*', ' | ').Trim() }
+          foreach ($k in $r.Containers | Where-Object { $_.Result -eq 'Failed' }) {
+            foreach ($e in $k.ErrorRecord) { "::error::container $($k.Item.Name): $(One $e.Exception.Message) @ $(One ($e.ScriptStackTrace -split "`n" | Select-Object -First 2 | Out-String))" }
+          }
+          foreach ($f in $r.Failed) {
+            "::error::$($f.ExpandedPath): $(One $f.ErrorRecord[0].Exception.Message)"
+          }
+          "Passed $($r.PassedCount), failed $($r.FailedCount)"
+          if ($r.Result -ne 'Passed') { exit 1 }
+
+  # ===========================================================================
+  # The catalogue: every tag live, rows identical to the Ubuntu release
+  # ===========================================================================
+  catalogue:
+    name: Catalogue checks
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Extract the rows
+        run: |
+          awk '/^# --- Light/{f=1} f && /^[0-9]+\|/{print} /^"@$/{f=0}' llmstack-windows.ps1 > "$RUNNER_TEMP/rows.txt"
+          wc -l "$RUNNER_TEMP/rows.txt"
+          [ -s "$RUNNER_TEMP/rows.txt" ]
+
+      # A 404 fails; anything else is the registry's problem and only warns.
+      - name: Every shipped tag exists in the Ollama registry
+        run: |
+          dead=0
+          cut -d'|' -f2 "$RUNNER_TEMP/rows.txt" | sort -u > "$RUNNER_TEMP/tags.txt"
+          while IFS= read -r tag; do
+            code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 \
+              -H 'Accept: application/vnd.docker.distribution.manifest.v2+json' \
+              "https://registry.ollama.ai/v2/library/${tag%%:*}/manifests/${tag##*:}") || code=000
+            case "$code" in
+              200) echo "LIVE     $tag" ;;
+              404) echo "::error::DEAD $tag"; dead=$((dead + 1)) ;;
+              *)   echo "::warning::UNKNOWN $tag (HTTP $code)" ;;
+            esac
+          done < "$RUNNER_TEMP/tags.txt"
+          [ "$dead" -eq 0 ]
+
+      # The three repositories share one catalogue generation. A mismatch
+      # warns: the Ubuntu repo moved on and this one should follow.
+      - name: Rows match the latest Ubuntu release
+        continue-on-error: true
+        run: |
+          curl -fsSL -o "$RUNNER_TEMP/u.sh" https://github.com/cautionespn/Linux-Local-LLM-Stack/releases/latest/download/llmstack-ubuntu.sh
+          awk '/^# --- Light/,/^CATALOG_EOF/' "$RUNNER_TEMP/u.sh" | grep -E '^[0-9]+\|' > "$RUNNER_TEMP/u.txt"
+          if ! diff "$RUNNER_TEMP/u.txt" "$RUNNER_TEMP/rows.txt"; then
+            echo "::warning::Catalogue rows differ from the latest Linux-Local-LLM-Stack release."
+            exit 1
+          fi
+          echo "identical ($(wc -l < "$RUNNER_TEMP/rows.txt") rows)"
+
+  # ===========================================================================
+  # End to end: a real install, use and uninstall on hosted runners.
+  # windows-latest is Windows Server 2025 (LLMSTACK_ALLOW_SERVER=1);
+  # windows-11-arm is real Windows 11 Enterprise on ARM64. Hosted Windows runners
+  # cannot run Linux containers, so SearXNG and Docker Desktop are not
+  # exercised here (-NoWebSearch).
+  # ===========================================================================
+  e2e:
+    name: End to end (${{ matrix.runner }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 75
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [windows-latest, windows-11-arm]
+    env:
+      LLMSTACK_ALLOW_SERVER: '1'
+      MODEL: smollm2:135m
+      # Release lookups for checksums; unauthenticated calls share a small quota.
+      GITHUB_TOKEN: ${{ github.token }}
+    defaults:
+      run:
+        shell: powershell
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Runner
+        run: |
+          $os = Get-CimInstance Win32_OperatingSystem
+          "$($os.Caption) build $($os.BuildNumber), $env:PROCESSOR_ARCHITECTURE, PowerShell $($PSVersionTable.PSVersion)"
+
+      - name: Install
+        run: |
+          .\llmstack-windows.ps1 -Yes -Model $env:MODEL -NoWebSearch *>&1 | Tee-Object -FilePath "$env:RUNNER_TEMP\install.log"
+          $rc = $LASTEXITCODE
+          if ($rc -ne 0) {
+            Select-String -Path "$env:RUNNER_TEMP\install.log" -Pattern '^(ERROR|WARNING|       at )' | Select-Object -First 8 | ForEach-Object { "::error::$($_.Line.Trim())" }
+            exit $rc
+          }
+
+      - name: Services run at boot under their own virtual accounts
+        run: |
+          $ErrorActionPreference = 'Stop'
+          foreach ($n in 'llmstack-ollama', 'llmstack-openwebui') {
+            $s = Get-CimInstance Win32_Service -Filter "Name='$n'"
+            "$n  $($s.State)  $($s.StartMode)  $($s.StartName)"
+            if ($s.State -ne 'Running' -or $s.StartMode -ne 'Auto' -or $s.StartName -ne "NT SERVICE\$n") { throw "$n is not configured as expected" }
+          }
+
+      - name: Ollama on loopback only; Open WebUI answers; model present
+        run: |
+          $ErrorActionPreference = 'Stop'
+          curl.exe -fsS http://127.0.0.1:11434/api/version
+          $l = @(Get-NetTCPConnection -LocalPort 11434 -State Listen)
+          $l | Format-Table LocalAddress, LocalPort, OwningProcess
+          if ($l | Where-Object { $_.LocalAddress -ne '127.0.0.1' }) { throw 'Ollama listens beyond loopback' }
+          curl.exe -fsS -o NUL http://127.0.0.1:8080
+          if ($LASTEXITCODE -ne 0) { throw 'Open WebUI is not answering' }
+          $list = & "$env:ProgramFiles\llmstack\ollama\ollama.exe" list
+          $list
+          if (-not ($list -match "^$([regex]::Escape($env:MODEL))\s")) { throw 'model missing' }
+
+      - name: Secret key is private, firewall rule exists, web search is off
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $key = "$env:ProgramData\llmstack\open-webui\.webui_secret_key"
+          $acl = Get-Acl $key
+          $acl.Access | Format-Table IdentityReference, FileSystemRights, AccessControlType
+          if ($acl.Access | Where-Object { $_.IdentityReference.Translate([Security.Principal.SecurityIdentifier]).Value -in 'S-1-5-32-545', 'S-1-5-11', 'S-1-1-0' }) { throw 'users can read the secret key' }
+          if ((Get-Content $key -Raw).Trim() -notmatch '^[0-9a-f]{64}$') { throw 'unexpected key format' }
+          $r = Get-NetFirewallRule -DisplayName 'llmstack Open WebUI'
+          if (-not $r -or $r.Profile -ne 'Private') { throw 'firewall rule missing or not Private-only' }
+          $cmdline = (Get-CimInstance Win32_Service -Filter "Name='llmstack-openwebui'").PathName
+          $cmdline
+          if ($cmdline -match 'SECRET') { throw 'secret on the service command line' }
+          if ($cmdline -notmatch 'ENABLE_WEB_SEARCH=false') { throw 'web search not off' }
+
+      - name: llmstatus
+        run: |
+          $out = & "$env:ProgramFiles\llmstack\bin\llmstatus.cmd"
+          $out
+          if (@($out | Where-Object { $_ -match ' UP ' }).Count -ne 2) { throw 'expected Ollama and Open WebUI UP' }
+
+      - name: Re-run is idempotent and keeps the secret
+        run: |
+          $key = "$env:ProgramData\llmstack\open-webui\.webui_secret_key"
+          $before = (Get-FileHash $key).Hash
+          .\llmstack-windows.ps1 -Yes -Model $env:MODEL -NoWebSearch
+          if ($LASTEXITCODE -ne 0) { throw "re-run failed ($LASTEXITCODE)" }
+          if ((Get-FileHash $key).Hash -ne $before) { throw 'secret changed' }
+
+      - name: Services come back after a restart
+        run: |
+          Restart-Service llmstack-ollama -Force
+          Start-Service llmstack-openwebui
+          for ($i = 0; $i -lt 300; $i += 3) { curl.exe -fsS -o NUL http://127.0.0.1:8080; if ($LASTEXITCODE -eq 0) { break }; Start-Sleep 3 }
+          curl.exe -fsS -o NUL http://127.0.0.1:8080
+          if ($LASTEXITCODE -ne 0) { throw 'Open WebUI did not come back' }
+          curl.exe -fsS http://127.0.0.1:11434/api/version
+
+      - name: Benchmark measures real tok/s
+        run: |
+          $out = .\llmstack-windows.ps1 -Benchmark -Model $env:MODEL 6>&1 | Out-String
+          $out
+          if ($out -notmatch "$([regex]::Escape($env:MODEL)) +\d+\.\d +\d+% GPU") { throw 'no benchmark row' }
+
+      - name: Sync against real Ollama and registry, answering no
+        run: |
+          $out = (1..20 | ForEach-Object { 'n' }) | powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\llmstack-windows.ps1 -SyncModels | Out-String
+          $out
+          if ($LASTEXITCODE -ne 0) { throw "sync failed ($LASTEXITCODE)" }
+          if ($out -notmatch 'SYNC COMPLETE|Nothing to do') { throw 'sync did not finish' }
+          $list = & "$env:ProgramFiles\llmstack\ollama\ollama.exe" list
+          if (-not ($list -match "^$([regex]::Escape($env:MODEL))\s")) { throw 'model was removed' }
+
+      - name: Update
+        if: matrix.runner == 'windows-latest'
+        run: |
+          .\llmstack-windows.ps1 -Update
+          if ($LASTEXITCODE -ne 0) { throw "update failed ($LASTEXITCODE)" }
+          if (-not (Get-ChildItem "$env:ProgramData\llmstack" -Directory -Filter 'open-webui.backup-*')) { throw 'no backup' }
+          curl.exe -fsS http://127.0.0.1:11434/api/version
+
+      - name: Uninstall, answering yes to everything
+        run: |
+          (1..40 | ForEach-Object { 'y' }) | powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\llmstack-windows.ps1 -Uninstall
+          if ($LASTEXITCODE -ne 0) { throw "uninstall failed ($LASTEXITCODE)" }
+          $left = @()
+          foreach ($n in 'llmstack-ollama', 'llmstack-openwebui') { if (Get-Service $n -ErrorAction SilentlyContinue) { $left += "service $n" } }
+          foreach ($p in "$env:ProgramFiles\llmstack", "$env:ProgramData\llmstack") { if (Test-Path $p) { $left += $p } }
+          if (Get-NetFirewallRule -DisplayName 'llmstack Open WebUI' -ErrorAction SilentlyContinue) { $left += 'firewall rule' }
+          if ([Environment]::GetEnvironmentVariable('Path', 'Machine') -match 'llmstack') { $left += 'PATH entry' }
+          if (Get-NetTCPConnection -LocalPort 11434, 8080 -State Listen -ErrorAction SilentlyContinue) { $left += 'listening port' }
+          if ($left) { $left | ForEach-Object { "::error::still there: $_" }; exit 1 }
+          'nothing left'
+
+      - name: Logs on failure
+        if: failure()
+        run: |
+          Get-ChildItem "$env:ProgramData\llmstack\logs" -ErrorAction SilentlyContinue | ForEach-Object {
+            "===== $($_.Name)"; Get-Content $_.FullName -Tail 120
+            # The last lines as annotations, readable on the run page.
+            Get-Content $_.FullName -Tail 4 | Where-Object { $_.Trim() } | ForEach-Object { "::warning::$($_.Trim())" }
+          }
+
+  # ===========================================================================
+  # Summary job for branch protection
+  # ===========================================================================
+  ci-pass:
+    name: CI Pass
+    runs-on: ubuntu-24.04
+    needs: [lint, actionlint, unit, catalogue, e2e]
+    if: always()
+    steps:
+      - name: Check job results
+        env:
+          RESULTS: ${{ join(needs.*.result, ' ') }}
+        run: |
+          echo "Results: $RESULTS"
+          for r in $RESULTS; do [ "$r" = success ] || { echo "::error::a required job did not succeed"; exit 1; }; done

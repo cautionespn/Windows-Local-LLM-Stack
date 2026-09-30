@@ -308,3 +308,16 @@ As in the other specs:
 ## 16. Extensions
 
 <!-- Append refinements below, referencing the section amended. -->
+
+### 16.1 Python 3.12 on ARM64 (amends §6)
+PyTorch publishes Windows-on-Arm wheels for Python 3.12, so the venv uses 3.12 on arm64 and 3.11 on amd64. Both are within Open WebUI's supported 3.11-3.12. Verified by the `windows-11-arm` end-to-end job.
+
+### 16.2 The arm64 end-to-end job is required (amends §15)
+The first run on `windows-11-arm` passed every step, so it is no longer marked experimental.
+
+### 16.3 CI failures surface as single-line annotations (amends §15)
+Pester failures, install errors and the tail of each service log are also emitted as one-line `::error::`/`::warning::` annotations, so the cause is visible on the run page without opening the raw log.
+
+### 16.4 Pester layout (amends §3)
+Pester allows `BeforeEach` only inside a block, so one outer `Describe` wraps the whole test file; the shared helpers stay in the root `BeforeAll`.
+
