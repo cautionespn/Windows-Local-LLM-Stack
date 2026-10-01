@@ -1599,7 +1599,9 @@ function Request-LlmDockerDesktop {
   $Script:Cfg.SearxngMode = 'off'
   Write-LlmLog 'Web search is off.'
   Write-LlmLine "    To turn on local search later, re-run with -SearxngPort $($Script:Cfg.SearxngPort) (it asks about"
-  Write-LlmLine '    Docker Desktop again), or use -SearxngUrl.'
+  Write-LlmLine '    Docker Desktop again), or use -SearxngUrl. If Open WebUI has already run,'
+  Write-LlmLine '    also turn web search off under Admin Panel > Settings > Web Search: it'
+  Write-LlmLine '    applies these settings only on its first start.'
 }
 
 # Returns $true when SearXNG is up (or not wanted), $false when it will be

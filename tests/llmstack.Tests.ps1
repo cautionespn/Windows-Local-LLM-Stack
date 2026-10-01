@@ -66,6 +66,7 @@ BeforeEach {
   $Script:Cfg = [ordered]@{ WebUIPort = 8080; SearxngMode = 'local'; SearxngUrl = 'http://127.0.0.1:8888'; SearxngPort = 8888 }
   foreach ($k in $Script:PathDefault.Keys) { Set-Variable -Name $k -Scope Script -Value $Script:PathDefault[$k] }
   $Script:AssumeYes = $false
+  $Script:InstallDockerDesktop = $false
   New-Data
   Set-Hw
   Set-Answers @()
@@ -707,6 +708,7 @@ Describe 'Services and secrets' {
     $out = Get-Out { Request-LlmDockerDesktop }
     $out | Should -Match 'Web search is off'
     $out | Should -Match '-SearxngPort 8888'
+    $out | Should -Match 'Admin Panel > Settings > Web Search'
     $Script:Cfg.SearxngMode | Should -Be 'off'
     [void](Get-Out { Install-LlmWebUI })
     $Script:Envs | Should -Contain 'ENABLE_WEB_SEARCH=false'

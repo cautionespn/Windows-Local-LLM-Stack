@@ -186,7 +186,7 @@ The deliverables are:
 - If Docker Desktop (`%ProgramFiles%\Docker\Docker\Docker Desktop.exe`) is missing, `Request-LlmDockerDesktop` asks **right after the install's go-ahead and before anything is configured**, so Open WebUI and `config.json` reflect the answer:
   - Explain WSL 2, the size, the restart, and the Docker Subscription Service Agreement (free for personal use and small businesses).
   - Ask separately; **`-Yes` never answers this**, and with no answer (EOF) it is no.
-  - **No** sets `SearxngMode` to `off` for this run and later ones (it is saved in `config.json`), so Open WebUI gets `ENABLE_WEB_SEARCH=false` and no SearXNG URL, and later re-runs stop asking. It prints `Web search is off. To turn on local search later, re-run with -SearxngPort <port> (it asks about Docker Desktop again), or use -SearxngUrl.`
+  - **No** sets `SearxngMode` to `off` for this run and later ones (it is saved in `config.json`), so Open WebUI gets `ENABLE_WEB_SEARCH=false` and no SearXNG URL, and later re-runs stop asking. It prints `Web search is off. To turn on local search later, re-run with -SearxngPort <port> (it asks about Docker Desktop again), or use -SearxngUrl. If Open WebUI has already run, also turn web search off under Admin Panel > Settings > Web Search: it applies these settings only on its first start.`
   - **Yes** keeps `local` and sets `$Script:InstallDockerDesktop`. At the SearXNG step, download `https://desktop.docker.com/win/main/<amd64|arm64>/Docker%20Desktop%20Installer.exe` and run `install --quiet --accept-license`. A non-zero installer exit only warns. Then say to sign out, start Docker Desktop and re-run. Open WebUI stays configured for local search, which starts working once SearXNG is up.
 - Find the Docker CLI at `%ProgramFiles%\Docker\Docker\resources\bin\docker.exe`, falling back to PATH. Readiness means `docker info --format {{.OSType}}` succeeds.
 - If Docker Desktop is installed but not running, start it through `explorer.exe`, which drops the elevated token, and poll every 3 s for up to 180 s.
@@ -659,6 +659,7 @@ Job timeouts: lint 10 min, unit 15, catalogue 5, end-to-end 75. The sync and uni
   - Docker Desktop is never installed without an explicit yes, even with `-Yes`;
   - declining Docker Desktop saves `off` and gives Open WebUI `ENABLE_WEB_SEARCH=false` and no SearXNG URL, and the message names `-SearxngPort`;
   - accepting keeps `local` and installs at the SearXNG step.
+- `BeforeEach` also resets `$Script:InstallDockerDesktop` to `$false`.
 - **1.0.1 additions:**
   - `-SearxngPort 0` and `-WebUIPort 65536` are rejected by `Invoke-LlmMain`, also with `-CheckModels`; an unbound port leaves the config value;
   - a non-admin `-SyncModels` with an old catalogue explains, does not ask, does not write, and still pulls;

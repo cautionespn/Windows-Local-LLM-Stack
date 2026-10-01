@@ -115,7 +115,7 @@ This is the one real limitation, and it is worth understanding before you instal
 **Where SearXNG can come from:**
 - **Local (default).** A SearXNG container in Docker Desktop, bound to `127.0.0.1:8888`.
   - If Docker Desktop isn't installed, the script explains what it involves and asks separately, right after you confirm the install; `-Yes` never answers this. Docker Desktop is free for personal use and small businesses under the [Docker Subscription Service Agreement](https://www.docker.com/legal/docker-subscription-service-agreement/). It needs WSL 2 and usually a restart. Re-run the installer afterwards to start SearXNG.
-  - **If you answer no,** web search is turned off, in Open WebUI and in the saved settings, so later runs don't ask again. To turn local search on later, re-run with `-SearxngPort 8888`, which asks about Docker Desktop again; or use `-SearxngUrl`.
+  - **If you answer no,** web search is turned off, in Open WebUI's service settings and in the saved settings, so later runs don't ask again. To turn local search on later, re-run with `-SearxngPort 8888`, which asks about Docker Desktop again; or use `-SearxngUrl`. If Open WebUI has already run, also turn web search off under **Admin Panel → Settings → Web Search**: Open WebUI applies the service settings only on its first start.
   - Keep **Settings → General → Start Docker Desktop when you sign in** turned on. The container restarts with Docker Desktop.
 - **Remote.** `-SearxngUrl http://host:port` points Open WebUI at a SearXNG you already run, such as the one from [Linux-Local-LLM-Stack](https://github.com/cautionespn/Linux-Local-LLM-Stack). No Docker is needed, and search works from boot. That instance must allow the `json` format.
 - **Off.** `-NoWebSearch` installs no SearXNG.
@@ -355,7 +355,7 @@ Invoke-ScriptAnalyzer -Path .\llmstack-windows.ps1 -Settings .\PSScriptAnalyzerS
 ## Changelog
 
 ### v1.0.1
-- **Declining Docker Desktop now turns web search off.** The question is asked right after you confirm the install, before Open WebUI is configured. Previously Open WebUI was already set up for local search, so answering no left web search switched on but broken. The choice is saved, and the message says how to turn local search on later (`-SearxngPort`). Verified in CI on both runners.
+- **Declining Docker Desktop now turns web search off.** The question is asked right after you confirm the install, before Open WebUI is configured. Previously Open WebUI was already set up for local search, so answering no left web search switched on but broken. The choice is saved, and the message says how to turn local search on later (`-SearxngPort`). On an install where Open WebUI has already started, also turn web search off in its Admin Panel, as the message says. Verified in CI on both runners.
 - **Ctrl-C during a model download** (install or `-SyncModels`) says the pull was interrupted and, for a sync, that nothing was removed, as the macOS and Ubuntu installers do.
 - **Ports are checked as soon as the script starts, in every mode.** `-SearxngPort 0` and `-WebUIPort 0` were silently ignored, and the catalogue modes didn't check ports at all.
 - **`-SyncModels` doesn't need an elevated PowerShell.** Only replacing an outdated catalogue does; without elevation the sync now explains that and carries on, instead of failing after you answered yes. `-Help` said sync needed elevation; it now says when.
