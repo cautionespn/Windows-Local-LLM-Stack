@@ -35,7 +35,7 @@
 | | |
 |---|---|
 | Repository | `cautionespn/Windows-Local-LLM-Stack` (public, GPL v3) |
-| Current version | 1.0.1 (2026-10-01; release `1.0.1` to be published by Chris). Previous: 1.0.0, tag `1.0.0` on `ef5b4b3`, released 2026-10-01 |
+| Current version | 1.0.1 (2026-10-01), tag `1.0.1` |
 | Catalogue generation | 3.4.0 |
 | Verified on | CI: real install, re-run, declining Docker Desktop, restart, benchmark, sync and uninstall on **Windows 11 Enterprise ARM64** (build 26200, `windows-11-arm`) and **Windows Server 2025 x64** (`windows-latest`, plus update); 63 Pester tests on 5.1 and 7 |
 | Not verified | local SearXNG in Docker Desktop and the Docker Desktop install (hosted Windows runners cannot run Linux containers), real GPU hardware, Windows 11 x64 (no hosted runner) |
