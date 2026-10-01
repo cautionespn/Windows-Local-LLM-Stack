@@ -214,7 +214,8 @@ jobs:
   # windows-latest is Windows Server 2025 (LLMSTACK_ALLOW_SERVER=1);
   # windows-11-arm is real Windows 11 Enterprise on ARM64. Hosted Windows runners
   # cannot run Linux containers, so SearXNG and Docker Desktop are not
-  # exercised here (-NoWebSearch).
+  # exercised here (-NoWebSearch). Declining Docker Desktop is: the runners
+  # do not have it installed.
   # ===========================================================================
   e2e:
     name: End to end (${{ matrix.runner }})
@@ -299,6 +300,22 @@ jobs:
           .\llmstack-windows.ps1 -Yes -Model $env:MODEL -NoWebSearch
           if ($LASTEXITCODE -ne 0) { throw "re-run failed ($LASTEXITCODE)" }
           if ((Get-FileHash $key).Hash -ne $before) { throw 'secret changed' }
+
+      - name: Declining Docker Desktop turns web search off
+        run: |
+          if (Test-Path "$env:ProgramFiles\Docker\Docker\Docker Desktop.exe") { "::notice::Docker Desktop is on this runner; the decline path was not exercised"; exit 0 }
+          # Asks for local search. -Yes answers the go-ahead; the Docker Desktop
+          # question reads the 'n' (-Yes never answers it).
+          $out = 'n' | powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\llmstack-windows.ps1 -Yes -Model $env:MODEL -SearxngPort 8888 | Out-String
+          $rc = $LASTEXITCODE
+          $out
+          if ($rc -ne 0) { "::error::install with -SearxngPort 8888 exited $rc"; exit 1 }
+          if ($out -notmatch 'Web search is off\.') { "::error::no 'Web search is off' message after declining Docker Desktop"; exit 1 }
+          $mode = (Get-Content "$env:ProgramData\llmstack\config.json" -Raw | ConvertFrom-Json).SearxngMode
+          if ($mode -ne 'off') { "::error::config.json SearxngMode is '$mode', not off"; exit 1 }
+          $cmdline = (Get-CimInstance Win32_Service -Filter "Name='llmstack-openwebui'").PathName
+          if ($cmdline -notmatch 'ENABLE_WEB_SEARCH=false' -or $cmdline -match 'SEARXNG_QUERY_URL') { "::error::Open WebUI is still configured for web search"; exit 1 }
+          'Declined: web search is off in config.json and in the Open WebUI service.'
 
       - name: Services come back after a restart
         run: |

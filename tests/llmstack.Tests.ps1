@@ -66,6 +66,7 @@ BeforeEach {
   $Script:Cfg = [ordered]@{ WebUIPort = 8080; SearxngMode = 'local'; SearxngUrl = 'http://127.0.0.1:8888'; SearxngPort = 8888 }
   foreach ($k in $Script:PathDefault.Keys) { Set-Variable -Name $k -Scope Script -Value $Script:PathDefault[$k] }
   $Script:AssumeYes = $false
+  $Script:InstallDockerDesktop = $false
   New-Data
   Set-Hw
   Set-Answers @()
@@ -160,6 +161,21 @@ Describe 'Script metadata and CLI validation' {
     $Script:Opt.WebUIPort = 70000
     { Resolve-LlmSettings } | Should -Throw -ExpectedMessage '*Invalid port*'
   }
+  It 'treats an unbound port as not given' {
+    $Script:OptDefault.WebUIPort | Should -BeNullOrEmpty
+    $Script:OptDefault.SearxngPort | Should -BeNullOrEmpty
+    [IO.File]::WriteAllText($Script:ConfigFile, '{ "WebUIPort": 3000, "SearxngMode": "local", "SearxngUrl": "", "SearxngPort": 8899 }')
+    Resolve-LlmSettings
+    $Script:Cfg.WebUIPort | Should -Be 3000
+    $Script:Cfg.SearxngPort | Should -Be 8899
+  }
+  It 'rejects -SearxngPort 0 and -WebUIPort 65536 in every mode, before dispatching' {
+    $Script:Opt.SearxngPort = 0; $Script:Opt.CheckModels = $true
+    { Invoke-LlmMain } | Should -Throw -ExpectedMessage '*Invalid port for -SearxngPort*'
+    $Script:Opt = $Script:OptDefault.Clone()
+    $Script:Opt.WebUIPort = 65536; $Script:Opt.Version = $true
+    { Invoke-LlmMain } | Should -Throw -ExpectedMessage '*Invalid port for -WebUIPort*'
+  }
   It 'rejects a SearXNG URL without a scheme' {
     $Script:Opt.SearxngUrl = '192.168.1.2:8888'
     { Resolve-LlmSettings } | Should -Throw -ExpectedMessage '*must start with http*'
@@ -172,6 +188,11 @@ Describe 'Script metadata and CLI validation' {
     $Script:Opt.NoWebSearch = $true
     Resolve-LlmSettings
     $Script:Cfg.SearxngMode | Should -Be 'off'
+  }
+  It 'says -SyncModels needs elevation only to replace a catalogue' {
+    $out = Get-Out { Show-LlmHelp }
+    $out | Should -Match 'needs one only to replace an outdated catalogue'
+    $out | Should -Not -Match 'uninstall and sync need'
   }
   It 'prints help naming every mode and option' {
     $out = Get-Out { Show-LlmHelp }
@@ -386,6 +407,50 @@ Describe 'Sync models' {
     $out | Should -Match 'THROWN'
     $out | Should -Match 'no models were removed'
     $Script:Ollama.Calls | Should -Not -Contain 'rm llama3.3:70b'
+  }
+  It 'needs no elevation: explains instead of offering a catalogue replacement, then still pulls' {
+    Mock Test-LlmAdmin { $false }
+    Mock Test-LlmDataWritable { $false }
+    Set-Catalog @('# Last-Updated: 2026-09-30', '32|qwen3.6:35b-a3b|24|moe|daily|yes|old')
+    $before = [IO.File]::ReadAllText($Script:CatalogPath)
+    Set-Answers @('y')
+    $out = Get-Out { Invoke-LlmSync }
+    $out | Should -Match 'no Catalogue-Generation line'
+    $out | Should -Match 'Replacing it needs Administrator'
+    $out | Should -Not -Match 'Back up your catalogue and replace'
+    $out | Should -Not -Match 'THROWN'
+    [IO.File]::ReadAllText($Script:CatalogPath) | Should -Be $before
+    @(Get-ChildItem $Script:DataRoot -Filter 'models.catalog.backup-*').Count | Should -Be 0
+    $Script:Ollama.Calls | Should -Contain 'pull qwen3.6:35b-a3b'
+  }
+  It 'guarded pull: returns the exit code and says nothing about an interruption' {
+    $Script:Ollama.PullFail = @('x:1')
+    $out = Get-Out { $Script:Code = Invoke-LlmGuardedPull 'x:1' 'Pull interrupted. TEST.' }
+    $Script:Code | Should -Be 1
+    $out | Should -Not -Match 'interrupted'
+  }
+  It 'guarded pull: rethrows an ordinary error without the interrupted message' {
+    Mock Invoke-LlmNativeLive { throw 'boom' }
+    $out = Get-Out { [void](Invoke-LlmGuardedPull 'x:1' 'Pull interrupted. TEST.') }
+    $out | Should -Match 'THROWN: boom'
+    $out | Should -Not -Match 'interrupted'
+  }
+  It 'guarded pull: a pipeline stop (Ctrl-C) prints the interrupted message and stops' {
+    # A real stop would end this Pester run, so it happens in a child
+    # PowerShell of the same edition that dot-sources the script.
+    $harness = Join-Path $TestDrive 'stop-harness.ps1'
+    $script = Join-Path (Split-Path -Parent $PSScriptRoot) 'llmstack-windows.ps1'
+    [IO.File]::WriteAllText($harness, @"
+. '$($script.Replace("'", "''"))'
+function Invoke-LlmNativeLive { throw (New-Object System.Management.Automation.PipelineStoppedException) }
+function Get-LlmOllamaExe { 'ollama.exe' }
+[void](Invoke-LlmGuardedPull 'x:1' 'Pull interrupted. TEST MESSAGE.')
+Write-Host 'AFTER THE PULL'
+"@)
+    $exe = (Get-Process -Id $PID).Path
+    $out = & $exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $harness 2>&1 | Out-String
+    $out | Should -Match 'Pull interrupted\. TEST MESSAGE\.'
+    $out | Should -Not -Match 'AFTER THE PULL'
   }
   It 'Ollama not running stops and changes nothing' {
     $Script:Ollama.Down = $true
@@ -622,10 +687,50 @@ Describe 'Services and secrets' {
     Mock Save-LlmDownload { }
     Resolve-LlmSettings
     Set-Answers @('')
-    $out = Get-Out { [void](Install-LlmSearxng) }
+    $out = Get-Out { Request-LlmDockerDesktop; [void](Install-LlmSearxng) }
     $out | Should -Match 'needs Docker Desktop'
-    $out | Should -Match 'Skipping local SearXNG'
+    $Script:InstallDockerDesktop | Should -BeFalse
     Should -Invoke Save-LlmDownload -Times 0
+  }
+  It 'declining Docker Desktop turns web search off in Open WebUI and the saved config' {
+    $Script:ProgramFilesDir = Join-Path $TestDrive 'nopf'
+    $Script:Envs = @()
+    Mock Install-LlmUv { }
+    Mock Install-LlmWebUIPackages { $true }
+    Mock Invoke-LlmIcacls { }
+    Mock Set-LlmFirewallRule { }
+    Mock Start-LlmService { }
+    Mock Install-LlmService { $Script:Envs = $Environment }
+    New-Item -ItemType File -Path (Join-Path $Script:VenvDir 'Scripts\python.exe') -Force | Out-Null
+    $Script:Sys = Get-LlmSystem
+    Resolve-LlmSettings
+    Set-Answers @('n')
+    $out = Get-Out { Request-LlmDockerDesktop }
+    $out | Should -Match 'Web search is off'
+    $out | Should -Match '-SearxngPort 8888'
+    $out | Should -Match 'Admin Panel > Settings > Web Search'
+    $Script:Cfg.SearxngMode | Should -Be 'off'
+    [void](Get-Out { Install-LlmWebUI })
+    $Script:Envs | Should -Contain 'ENABLE_WEB_SEARCH=false'
+    ($Script:Envs -join ' ') | Should -Not -Match 'SEARXNG_QUERY_URL'
+    Save-LlmConfig
+    ([IO.File]::ReadAllText($Script:ConfigFile) | ConvertFrom-Json).SearxngMode | Should -Be 'off'
+    Install-LlmSearxng | Should -BeTrue
+  }
+  It 'accepting Docker Desktop keeps local search and installs it at the SearXNG step' {
+    $Script:ProgramFilesDir = Join-Path $TestDrive 'nopf'
+    $Script:Sys = Get-LlmSystem
+    Mock Save-LlmDownload { }
+    Mock Start-Process { [pscustomobject]@{ ExitCode = 0 } }
+    Resolve-LlmSettings
+    Set-Answers @('y')
+    [void](Get-Out { Request-LlmDockerDesktop })
+    $Script:InstallDockerDesktop | Should -BeTrue
+    $Script:Cfg.SearxngMode | Should -Be 'local'
+    $out = Get-Out { $Script:Ready = Install-LlmSearxng }
+    $Script:Ready | Should -BeFalse
+    $out | Should -Match 'Docker Desktop installed'
+    Should -Invoke Save-LlmDownload -Times 1
   }
 }
 

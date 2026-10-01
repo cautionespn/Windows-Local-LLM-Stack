@@ -1,5 +1,5 @@
 <#
-llmstack-windows.ps1  v1.0.0
+llmstack-windows.ps1  v1.0.1
 
 A self-contained, private LLM stack for Windows 11.
 
@@ -69,21 +69,25 @@ $Script:Opt = @{
   Version = $Version
   Help = $Help
   SearxngUrl = $SearxngUrl
-  SearxngPort = $SearxngPort
+  SearxngPort = $null
   NoWebSearch = $NoWebSearch
-  WebUIPort = $WebUIPort
+  WebUIPort = $null
   Model = $Model
   NoModel = $NoModel
   OllamaVersion = $OllamaVersion
   Yes = $Yes
   Discover = $Discover
 }
+# A port is "given" when it was bound, not when it is non-zero: before
+# 1.0.1, -SearxngPort 0 was silently read as "not given".
+if ($PSBoundParameters.ContainsKey('SearxngPort')) { $Script:Opt.SearxngPort = $SearxngPort }
+if ($PSBoundParameters.ContainsKey('WebUIPort')) { $Script:Opt.WebUIPort = $WebUIPort }
 
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
 $Script:ScriptName = 'llmstack-windows.ps1'
-$Script:ScriptVersion = '1.0.0'
+$Script:ScriptVersion = '1.0.1'
 $Script:CatalogDate = '2026-09-30'
 # Shared with the macOS and Ubuntu repositories: the MacOS-Local-LLM-Stack
 # version in which the built-in catalogue rows last changed. Keep the three
@@ -980,9 +984,9 @@ function Read-LlmConfig {
 
 function Resolve-LlmSettings {
   Read-LlmConfig
-  if ($Script:Opt.WebUIPort -ne 0) { Test-LlmPort $Script:Opt.WebUIPort; $Script:Cfg.WebUIPort = $Script:Opt.WebUIPort }
-  if ($Script:Opt.SearxngPort -ne 0) {
-    Test-LlmPort $Script:Opt.SearxngPort
+  if ($null -ne $Script:Opt.WebUIPort) { Test-LlmPort $Script:Opt.WebUIPort '-WebUIPort'; $Script:Cfg.WebUIPort = $Script:Opt.WebUIPort }
+  if ($null -ne $Script:Opt.SearxngPort) {
+    Test-LlmPort $Script:Opt.SearxngPort '-SearxngPort'
     $Script:Cfg.SearxngPort = $Script:Opt.SearxngPort; $Script:Cfg.SearxngMode = 'local'
   }
   if ($Script:Cfg.SearxngMode -eq 'local') { $Script:Cfg.SearxngUrl = "http://127.0.0.1:$($Script:Cfg.SearxngPort)" }
@@ -1002,8 +1006,8 @@ function Save-LlmConfig {
   Write-LlmTextFile $Script:ConfigFile (($o | ConvertTo-Json) + "`n")
 }
 
-function Test-LlmPort([int]$Port) {
-  if ($Port -lt 1 -or $Port -gt 65535) { Stop-LlmStack "Invalid port: '$Port' (must be 1-65535)" }
+function Test-LlmPort([int]$Port, [string]$Name = 'port') {
+  if ($Port -lt 1 -or $Port -gt 65535) { Stop-LlmStack "Invalid port for ${Name}: '$Port' (must be 1-65535)" }
 }
 
 # "process (pid)" holding a TCP port, or '' when free.
@@ -1098,7 +1102,8 @@ DESCRIPTION
     starts only after someone signs in, so web search works from then on.
     Before installing, the script inspects the GPUs, memory and disk, then
     consults a dated model catalogue to recommend models that fit.
-    Install, update, uninstall and sync need an elevated PowerShell. The
+    Install, update, uninstall, start and stop need an elevated PowerShell;
+    -SyncModels needs one only to replace an outdated catalogue. The
     script is idempotent: re-running is safe and data is never overwritten.
 MODES
     -Install        Install or repair the stack. Default.
@@ -1345,6 +1350,23 @@ function Get-LlmOllamaExe {
 
 function Invoke-LlmOllama([string[]]$Arguments) { return (Invoke-LlmNative (Get-LlmOllamaExe) $Arguments) }
 
+# Pulls one model with live progress and returns ollama's exit code. Ctrl-C
+# stops the pipeline: PowerShell then skips catch blocks but still runs
+# finally, so "not done and no ordinary error" there means an interruption.
+function Invoke-LlmGuardedPull([string]$Tag, [string]$InterruptMessage) {
+  $done = $false; $failed = $false
+  try {
+    $code = Invoke-LlmNativeLive (Get-LlmOllamaExe) @('pull', $Tag)
+    $done = $true
+    return $code
+  } catch {
+    $failed = $true
+    throw
+  } finally {
+    if (-not $done -and -not $failed) { Write-LlmWarn $InterruptMessage }
+  }
+}
+
 function Get-LlmInstalledOllamaVersion {
   if (-not (Test-Path -LiteralPath $Script:OllamaExe)) { return '' }
   $r = Invoke-LlmNative $Script:OllamaExe @('-v')
@@ -1558,6 +1580,30 @@ services:
 "@
 }
 
+# Local web search without Docker Desktop: ask now, before Open WebUI and
+# config.json are written, so both reflect the answer. Before 1.0.1 the
+# question came after Open WebUI was configured for local search, so a no
+# left web search switched on but broken. -Yes never answers this.
+$Script:InstallDockerDesktop = $false
+function Request-LlmDockerDesktop {
+  $Script:InstallDockerDesktop = $false
+  if ($Script:Cfg.SearxngMode -ne 'local') { return }
+  if (Test-Path -LiteralPath (Get-LlmDockerDesktopExe)) { return }
+  Write-LlmWarn 'Local web search needs Docker Desktop, which is not installed.'
+  Write-LlmLine '    Docker Desktop runs SearXNG in a Linux container. It needs WSL 2 and'
+  Write-LlmLine '    hardware virtualisation, downloads about 600 MB, may need a restart or'
+  Write-LlmLine '    sign-out, and starts only when someone signs in. It is free for personal'
+  Write-LlmLine '    use and small businesses under the Docker Subscription Service Agreement:'
+  Write-LlmLine '    https://www.docker.com/legal/docker-subscription-service-agreement/'
+  if (Confirm-Llm 'Download and install Docker Desktop now?') { $Script:InstallDockerDesktop = $true; return }
+  $Script:Cfg.SearxngMode = 'off'
+  Write-LlmLog 'Web search is off.'
+  Write-LlmLine "    To turn on local search later, re-run with -SearxngPort $($Script:Cfg.SearxngPort) (it asks about"
+  Write-LlmLine '    Docker Desktop again), or use -SearxngUrl. If Open WebUI has already run,'
+  Write-LlmLine '    also turn web search off under Admin Panel > Settings > Web Search: it'
+  Write-LlmLine '    applies these settings only on its first start.'
+}
+
 # Returns $true when SearXNG is up (or not wanted), $false when it will be
 # finished on a later run.
 function Install-LlmSearxng {
@@ -1565,14 +1611,8 @@ function Install-LlmSearxng {
   Write-LlmSearxngSettings
   Write-LlmCompose
   if (-not (Test-Path -LiteralPath (Get-LlmDockerDesktopExe))) {
-    Write-LlmWarn 'Local web search needs Docker Desktop, which is not installed.'
-    Write-LlmLine '    Docker Desktop runs SearXNG in a Linux container. It needs WSL 2 and'
-    Write-LlmLine '    hardware virtualisation, downloads about 600 MB, may need a restart or'
-    Write-LlmLine '    sign-out, and starts only when someone signs in. It is free for personal'
-    Write-LlmLine '    use and small businesses under the Docker Subscription Service Agreement:'
-    Write-LlmLine '    https://www.docker.com/legal/docker-subscription-service-agreement/'
-    if (-not (Confirm-Llm 'Download and install Docker Desktop now?')) {
-      Write-LlmLog 'Skipping local SearXNG. Web search stays off until you re-run with Docker Desktop or -SearxngUrl.'
+    if (-not $Script:InstallDockerDesktop) {
+      Write-LlmWarn 'Docker Desktop is not installed, so local SearXNG cannot start. Re-run the installer to be asked about installing it.'
       return $false
     }
     $arch = 'amd64'; if ($Script:Sys.Arch -eq 'arm64') { $arch = 'arm64' }
@@ -1739,7 +1779,12 @@ function Invoke-LlmSync {
     Write-LlmLine '    If you maintain your own catalogue on purpose, answer no and add'
     Write-LlmLine '    this line to it to stop being asked:'
     Write-LlmLine "      # Catalogue-Generation: $($Script:CatalogGeneration)"
-    if (Confirm-Llm 'Back up your catalogue and replace it with the built-in one?') {
+    if (-not (Test-LlmDataWritable)) {
+      # Pulls and removals go through the Ollama service; only this needs
+      # Administrator, so say so instead of failing after a yes.
+      Write-LlmLine '    Replacing it needs Administrator. To be offered the replacement, run'
+      Write-LlmLine '    -SyncModels from an elevated PowerShell. Carrying on with your catalogue.'
+    } elseif (Confirm-Llm 'Back up your catalogue and replace it with the built-in one?') {
       Backup-LlmCatalog
       Save-LlmCatalogText $Script:CatalogPath (Get-LlmDefaultCatalogText)
       Write-LlmOk 'Catalogue replaced. Backup kept alongside it.'
@@ -1817,7 +1862,7 @@ function Invoke-LlmSync {
   $pulled = @(); $updated = @(); $failed = @(); $removed = @(); $kept = @()
   foreach ($s in $sel) {
     Write-LlmLog "Pulling $($s.Tag) (about $($s.Size) GB). Large downloads take a while."
-    $code = Invoke-LlmNativeLive (Get-LlmOllamaExe) @('pull', $s.Tag)
+    $code = Invoke-LlmGuardedPull $s.Tag 'Pull interrupted. Nothing was removed. Re-run to resume the download.'
     if ($code -eq 0) {
       if ($s.Kind -eq 'update') { $updated += $s.Tag } else { $pulled += $s.Tag }
       Write-LlmOk "Pulled $($s.Tag)"
@@ -1988,6 +2033,7 @@ function Invoke-LlmInstall {
   }
 
   if (-not (Confirm-LlmInstall 'Install the stack as shown above?')) { Write-LlmLog 'Cancelled. Nothing was changed.'; return }
+  Request-LlmDockerDesktop
   $Script:InstallStarted = $true
 
   Resolve-LlmOllamaAppConflict
@@ -2007,7 +2053,7 @@ function Invoke-LlmInstall {
     if ($names -contains (ConvertTo-LlmModelName $modelTag)) { Write-LlmLog "Model already present: $modelTag" }
     else {
       Write-LlmLog "Pulling $modelTag. This is a large download and will take a while."
-      if ((Invoke-LlmNativeLive $Script:OllamaExe @('pull', $modelTag)) -eq 0) { Write-LlmOk "Model pulled: $modelTag" }
+      if ((Invoke-LlmGuardedPull $modelTag 'Pull interrupted. Re-run to resume the download.') -eq 0) { Write-LlmOk "Model pulled: $modelTag" }
       else { Write-LlmWarn "The pull failed for $modelTag. Everything else installed; pull it later with: ollama pull $modelTag" }
     }
   }
@@ -2190,6 +2236,8 @@ function Invoke-LlmMain {
   if ($Script:Opt.OllamaVersion -and $Script:Opt.OllamaVersion -notmatch '^\d+\.\d+\.\d+(-rc\d+)?$') { Stop-LlmStack "-OllamaVersion must look like 0.35.0, not '$($Script:Opt.OllamaVersion)'" }
   if ($Script:Opt.Model -and $Script:Opt.Model -notmatch '^[A-Za-z0-9][A-Za-z0-9._/-]*(:[A-Za-z0-9._-]+)?$') { Stop-LlmStack "-Model must be an Ollama tag such as qwen3.5:4b, not '$($Script:Opt.Model)'" }
   if ($Script:Opt.SearxngUrl -and $Script:Opt.NoWebSearch) { Stop-LlmStack 'Choose -SearxngUrl or -NoWebSearch, not both.' }
+  # Every mode, so a bad port is never silently ignored.
+  foreach ($k in @('WebUIPort', 'SearxngPort')) { if ($null -ne $Script:Opt[$k]) { Test-LlmPort $Script:Opt[$k] "-$k" } }
   # TLS 1.2 for Invoke-RestMethod on Windows PowerShell 5.1.
   [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
   switch ($mode) {
