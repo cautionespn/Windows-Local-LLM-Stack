@@ -1899,7 +1899,7 @@ function Invoke-LlmSync {
   if ($failed.Count -gt 0) {
     Write-LlmWarn 'Some pulls failed, so no models were removed:'
     Write-LlmPullFailureReason $failed
-    Stop-LlmStack 'Fix the cause above, then re-run -SyncModels.'
+    Stop-LlmStack 'Nothing was removed. Deal with the cause above, then re-run -SyncModels.'
   }
 
   # 7. Offer each non-pick for removal, one at a time.

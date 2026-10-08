@@ -428,7 +428,9 @@ Describe 'Sync models' {
     $out = Get-Out { Invoke-LlmSync }
     $out | Should -Match 'qwen3\.6:35b-a3b +tag not found in the registry'
     $out | Should -Match 'Check the tag at https://ollama\.com/library'
+    $out | Should -Match 'THROWN'
     $out | Should -Not -Match 'download failed|VPN,|registry unreachable'
+    $Script:Ollama.Calls | Should -Not -Contain 'rm llama3.3:70b'
   }
   It 'a failed pull with the registry down says so' {
     $Script:Ollama.Models = @('llama3.3:70b')
@@ -438,7 +440,9 @@ Describe 'Sync models' {
     $out = Get-Out { Invoke-LlmSync }
     $out | Should -Match 'qwen3\.6:35b-a3b +registry unreachable'
     $out | Should -Match 'did not answer'
+    $out | Should -Match 'THROWN'
     $out | Should -Not -Match 'Check the tag|VPN,'
+    $Script:Ollama.Calls | Should -Not -Contain 'rm llama3.3:70b'
   }
   It 'needs no elevation: explains instead of offering a catalogue replacement, then still pulls' {
     Mock Test-LlmAdmin { $false }
