@@ -12,7 +12,7 @@
 > private meta repository. The rules they share with this spec are copied
 > in below; the rest are the maintainer's working notes.
 
-# 30 — Rebuild spec: Windows-Local-LLM-Stack (`llmstack-windows.ps1` v1.0.1)
+# 30 — Rebuild spec: Windows-Local-LLM-Stack (`llmstack-windows.ps1` v1.0.2)
 
 **Use this prompt to rebuild the repository from an empty folder, or to change it.**
 - Give the whole file to Claude with the instruction: *"Build (or update) the repository described here. Follow it exactly; where it is silent, ask."*
@@ -35,9 +35,9 @@
 | | |
 |---|---|
 | Repository | `cautionespn/Windows-Local-LLM-Stack` (public, GPL v3) |
-| Current version | 1.0.1 (2026-10-01), tag `1.0.1` |
+| Current version | 1.0.2 (2026-10-08), tag `1.0.2` |
 | Catalogue generation | 3.4.0 |
-| Verified on | CI: real install, re-run, declining Docker Desktop, restart, benchmark, sync and uninstall on **Windows 11 Enterprise ARM64** (build 26200, `windows-11-arm`) and **Windows Server 2025 x64** (`windows-latest`, plus update); 63 Pester tests on 5.1 and 7 |
+| Verified on | CI: real install, re-run, declining Docker Desktop, restart, benchmark, sync and uninstall on **Windows 11 Enterprise ARM64** (build 26200, `windows-11-arm`) and **Windows Server 2025 x64** (`windows-latest`, plus update); 66 Pester tests on 5.1 and 7 |
 | Not verified | local SearXNG in Docker Desktop and the Docker Desktop install (hosted Windows runners cannot run Linux containers), real GPU hardware, Windows 11 x64 (no hosted runner) |
 
 ---
@@ -352,6 +352,18 @@ This mode brings installed models in line with the current picks. **The safety p
    - Warn, and say "Nothing was changed. To free space first, run --sync-models again, decline every pull, and answer yes to the removals you want."
    - Exit 1.
 7. **Pull** everything chosen. On Ctrl-C during a pull, say "Pull interrupted. Nothing was removed. Re-run to resume the download." and stop: bash traps `INT`; PowerShell, where a stop skips `catch` but runs `finally`, prints it from a `finally` guarded by "not done and no ordinary error". If any pull fails, list the failures, say "no models were removed", and exit 1.
+
+   **Say why each pull failed.** Ollama's own error does not tell a missing tag from a dropped connection, so probe each failed tag's manifest once with the registry check (the same endpoint and timeout) and print it with a reason:
+   - 200: `download failed (the tag is in the registry)`
+   - 404: `tag not found in the registry`
+   - anything else: `registry unreachable`
+
+   Then print one hint for each reason that occurred, in that order:
+   - "The registry has the tag, so the download itself was cut off. A VPN, proxy or security software between this machine and the registry may be resetting long downloads. Downloaded parts are kept, so re-running resumes them."
+   - "Check the tag at https://ollama.com/library."
+   - "The registry did not answer. Check this machine's network, then re-run."
+
+   Never suggest checking the tag when the registry served it (MBP5800, 2026-10-05: Zscaler reset every blob download while the manifests loaded, and the old message blamed the tags).
 8. **Remove**, one model at a time:
    - Show the model's name and size.
    - If `ollama show` lists an `embedding` capability, warn that Open WebUI may use it for document search.
@@ -666,11 +678,14 @@ Job timeouts: lint 10 min, unit 15, catalogue 5, end-to-end 75. The sync and uni
   - `-Help` no longer says sync needs elevation;
   - `Invoke-LlmGuardedPull`: a normal exit code is returned without the message; an ordinary error is rethrown without it; a pipeline stop, run in a child PowerShell (the same edition as the test) that dot-sources the script and overrides `Invoke-LlmNativeLive` to throw `PipelineStoppedException`, prints the message and nothing after it. A real stop would end the Pester run, hence the child process.
 
-Total: 63 tests (54 in 1.0.0).
+- **1.0.2 additions:** a failed sync pull names its cause: a live tag says the download failed, gives the VPN/proxy hint and never says "Check the tag"; a missing tag says so and points at the library; an unreachable registry says so.
+
+Total: 66 tests (63 in 1.0.1, 54 in 1.0.0).
 
 ## Appendix — Version history
 
 | Version | Change |
 |---|---|
+| 1.0.2 (2026-10-08) | `-SyncModels` says why each pull failed (live tag: download cut off; missing tag; registry unreachable) instead of always suggesting the tag |
 | 1.0.1 (2026-10-01) | Ctrl-C during pulls prints the interrupted message (backlog 4b); declining Docker Desktop turns web search off before Open WebUI is configured (4c); ports validated when given, in every mode (4d); `-SyncModels` needs no elevation and explains instead of failing when a catalogue replacement would need it (4e); `PROMPT.md` exported from this spec |
 | 1.0.0 (2026-09-30) | First version; PR #1 merged as `ef5b4b3`. CI fixes before merge: root `BeforeEach`; analyzer per file; failures as annotations; arm64 job made required; LF-only built-in catalogue; `Get-LlmVramBytes`; the prompt mock prints its question |
