@@ -1,5 +1,5 @@
 <#
-llmstack-windows.ps1  v1.0.1
+llmstack-windows.ps1  v1.0.2
 
 A self-contained, private LLM stack for Windows 11.
 
@@ -87,7 +87,7 @@ if ($PSBoundParameters.ContainsKey('WebUIPort')) { $Script:Opt.WebUIPort = $WebU
 # Constants
 # ---------------------------------------------------------------------------
 $Script:ScriptName = 'llmstack-windows.ps1'
-$Script:ScriptVersion = '1.0.1'
+$Script:ScriptVersion = '1.0.2'
 $Script:CatalogDate = '2026-09-30'
 # Shared with the macOS and Ubuntu repositories: the MacOS-Local-LLM-Stack
 # version in which the built-in catalogue rows last changed. Keep the three
@@ -1746,6 +1746,31 @@ function Get-LlmRegistryManifestId([string]$Tag) {
   } finally { Remove-Item -LiteralPath $f -Force -ErrorAction SilentlyContinue }
 }
 
+# Why each failed pull failed. Ollama's error does not tell a missing tag
+# from a dropped connection, so probe each manifest once: a tag the registry
+# serves means the download itself was cut off. On MBP5800 (2026-10-05)
+# Zscaler reset every blob download while the manifests loaded, and the old
+# message blamed the tags.
+function Write-LlmPullFailureReason([string[]]$Tags) {
+  $live = $false; $dead = $false; $down = $false
+  foreach ($t in $Tags) {
+    switch (Get-LlmRegistryStatus $t) {
+      'LIVE' { $why = 'download failed (the tag is in the registry)'; $live = $true }
+      'DEAD' { $why = 'tag not found in the registry'; $dead = $true }
+      default { $why = 'registry unreachable'; $down = $true }
+    }
+    Write-LlmLine ('      {0,-30} {1}' -f $t, $why)
+  }
+  if ($live) {
+    Write-LlmLine '    The registry has the tag, so the download itself was cut off. A VPN,'
+    Write-LlmLine '    proxy or security software between this machine and the registry may'
+    Write-LlmLine '    be resetting long downloads. Downloaded parts are kept, so re-running'
+    Write-LlmLine '    resumes them.'
+  }
+  if ($dead) { Write-LlmLine '    Check the tag at https://ollama.com/library.' }
+  if ($down) { Write-LlmLine "    The registry did not answer. Check this machine's network, then re-run." }
+}
+
 function Invoke-LlmSync {
   $sys = Get-LlmSystem
   Initialize-LlmCatalog
@@ -1873,8 +1898,8 @@ function Invoke-LlmSync {
   }
   if ($failed.Count -gt 0) {
     Write-LlmWarn 'Some pulls failed, so no models were removed:'
-    foreach ($f in $failed) { Write-LlmLine "      $f" }
-    Stop-LlmStack 'Check the tag at https://ollama.com/library and your network, then re-run.'
+    Write-LlmPullFailureReason $failed
+    Stop-LlmStack 'Nothing was removed. Deal with the cause above, then re-run -SyncModels.'
   }
 
   # 7. Offer each non-pick for removal, one at a time.

@@ -354,6 +354,10 @@ Invoke-ScriptAnalyzer -Path .\llmstack-windows.ps1 -Settings .\PSScriptAnalyzerS
 
 ## Changelog
 
+### v1.0.2
+- **A failed `-SyncModels` pull now says why.** The script checks each failed tag against the Ollama registry. If the registry has the tag, it reports that the download itself was cut off and suggests a VPN, proxy or security software that may be resetting long downloads; downloaded parts are kept, so re-running resumes them. If the tag is missing it points at the Ollama library, and if the registry does not answer it says so. Previously every failure said "Check the tag", even when the tag was fine and a corporate security tool was dropping the connection. Tested against a stub registry in CI; not yet reproduced end to end on a machine behind an intercepting proxy.
+- **`PROMPT.md`** updated from the maintainer's spec.
+
 ### v1.0.1
 - **Declining Docker Desktop now turns web search off.** The question is asked right after you confirm the install, before Open WebUI is configured. Previously Open WebUI was already set up for local search, so answering no left web search switched on but broken. The choice is saved, and the message says how to turn local search on later (`-SearxngPort`). On an install where Open WebUI has already started, also turn web search off in its Admin Panel, as the message says. Verified in CI on both runners.
 - **Ctrl-C during a model download** (install or `-SyncModels`) says the pull was interrupted and, for a sync, that nothing was removed, as the macOS and Ubuntu installers do.

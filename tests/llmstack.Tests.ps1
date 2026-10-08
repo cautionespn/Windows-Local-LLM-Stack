@@ -408,6 +408,42 @@ Describe 'Sync models' {
     $out | Should -Match 'no models were removed'
     $Script:Ollama.Calls | Should -Not -Contain 'rm llama3.3:70b'
   }
+  # 1.0.2: the failure names its cause (fake registry: $Script:Live, $Script:RegDown).
+  It 'a failed pull of a live tag blames the download, not the tag' {
+    $Script:Ollama.Models = @('llama3.3:70b')
+    $Script:Ollama.PullFail = @('qwen3.6:35b-a3b')
+    $Script:Live = @('*')
+    Set-Answers @('y', 'y', 'y', 'y', 'y', 'y')
+    $out = Get-Out { Invoke-LlmSync }
+    $out | Should -Match 'THROWN'
+    $out | Should -Match 'qwen3\.6:35b-a3b +download failed \(the tag is in the registry\)'
+    $out | Should -Match 'VPN,'
+    $out | Should -Not -Match 'Check the tag|tag not found|registry unreachable'
+    $Script:Ollama.Calls | Should -Not -Contain 'rm llama3.3:70b'
+  }
+  It 'a failed pull of a missing tag points at the library' {
+    $Script:Ollama.Models = @('llama3.3:70b')
+    $Script:Ollama.PullFail = @('qwen3.6:35b-a3b')
+    Set-Answers @('y', 'y', 'y', 'y', 'y', 'y')
+    $out = Get-Out { Invoke-LlmSync }
+    $out | Should -Match 'qwen3\.6:35b-a3b +tag not found in the registry'
+    $out | Should -Match 'Check the tag at https://ollama\.com/library'
+    $out | Should -Match 'THROWN'
+    $out | Should -Not -Match 'download failed|VPN,|registry unreachable'
+    $Script:Ollama.Calls | Should -Not -Contain 'rm llama3.3:70b'
+  }
+  It 'a failed pull with the registry down says so' {
+    $Script:Ollama.Models = @('llama3.3:70b')
+    $Script:Ollama.PullFail = @('qwen3.6:35b-a3b')
+    $Script:RegDown = $true
+    Set-Answers @('y', 'y', 'y', 'y', 'y', 'y')
+    $out = Get-Out { Invoke-LlmSync }
+    $out | Should -Match 'qwen3\.6:35b-a3b +registry unreachable'
+    $out | Should -Match 'did not answer'
+    $out | Should -Match 'THROWN'
+    $out | Should -Not -Match 'Check the tag|VPN,'
+    $Script:Ollama.Calls | Should -Not -Contain 'rm llama3.3:70b'
+  }
   It 'needs no elevation: explains instead of offering a catalogue replacement, then still pulls' {
     Mock Test-LlmAdmin { $false }
     Mock Test-LlmDataWritable { $false }
