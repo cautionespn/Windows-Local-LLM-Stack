@@ -568,6 +568,23 @@ Write-Host 'AFTER THE PULL'
       $out | Should -Not -Match 'Attempt 10 of 10'
       $out | Should -Match 'Giving up on q:1 for now after 10 attempts\.'
     }
+    It 'progress that turns unreadable late stops at once with the real count' {
+      Set-Resume @(1) @(0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, $null)
+      $out = Get-Out { [void](Invoke-LlmResumingPull 'q:1' 'Pull interrupted. TEST.') }
+      Get-Pulls 'q:1' | Should -Be 11
+      $out | Should -Match 'Giving up on q:1 for now after 11 attempts\.'
+      $out | Should -Not -Match 'after 10 attempts'
+    }
+    It 'the pause hook ignores a value with a trailing newline' {
+      $harness = Join-Path $TestDrive 'pause-hook.ps1'
+      $script = Join-Path (Split-Path -Parent $PSScriptRoot) 'llmstack-windows.ps1'
+      [IO.File]::WriteAllText($harness, ". '$($script.Replace("'", "''"))'`nWrite-Host ""PAUSE=`$(`$Script:ResumePauseS)""")
+      $exe = (Get-Process -Id $PID).Path
+      $env:LLMSTACK_RESUME_PAUSE = "5`n"
+      try { $out = & $exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $harness 2>&1 | Out-String }
+      finally { Remove-Item Env:LLMSTACK_RESUME_PAUSE -ErrorAction SilentlyContinue }
+      $out | Should -Match 'PAUSE=10'
+    }
     It 'a tag the registry does not serve is never retried' {
       $Script:Live = @()
       Set-Resume @(1) @(0)

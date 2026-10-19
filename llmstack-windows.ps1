@@ -105,7 +105,7 @@ $Script:ResumeStallLimit = 3
 $Script:ResumeBlindLimit = 10
 $Script:ResumePauseS = 10
 $resumePause = 0
-if ("$env:LLMSTACK_RESUME_PAUSE" -match '^[0-9]+$' -and [int]::TryParse("$env:LLMSTACK_RESUME_PAUSE", [ref]$resumePause)) {
+if ("$env:LLMSTACK_RESUME_PAUSE" -match '\A[0-9]+\z' -and [int]::TryParse("$env:LLMSTACK_RESUME_PAUSE", [ref]$resumePause)) {
   $Script:ResumePauseS = $resumePause
 }
 
@@ -1850,8 +1850,10 @@ function Invoke-LlmResumingPull([string]$Tag, [string]$InterruptMessage) {
       $after = Get-LlmSavedBytes
       $pause = "Resuming in $($Script:ResumePauseS) s (Ctrl-C stops)."
       if ($null -eq $before -or $null -eq $after) {
+        # $n counts every attempt, so this also stops a pull that turns
+        # blind late.
         if ($n -ge $Script:ResumeBlindLimit) {
-          Write-LlmWarn "Giving up on $Tag for now after $($Script:ResumeBlindLimit) attempts."
+          Write-LlmWarn "Giving up on $Tag for now after $n attempts."
           $done = $true; return $code
         }
         Write-LlmWarn "Attempt $n of $($Script:ResumeBlindLimit) was cut off (saved progress can't be read here). $pause"
