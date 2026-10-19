@@ -1,5 +1,5 @@
 <#
-llmstack-windows.ps1  v1.0.2
+llmstack-windows.ps1  v1.0.3
 
 A self-contained, private LLM stack for Windows 11.
 
@@ -87,7 +87,7 @@ if ($PSBoundParameters.ContainsKey('WebUIPort')) { $Script:Opt.WebUIPort = $WebU
 # Constants
 # ---------------------------------------------------------------------------
 $Script:ScriptName = 'llmstack-windows.ps1'
-$Script:ScriptVersion = '1.0.2'
+$Script:ScriptVersion = '1.0.3'
 $Script:CatalogDate = '2026-09-30'
 # Shared with the macOS and Ubuntu repositories: the MacOS-Local-LLM-Stack
 # version in which the built-in catalogue rows last changed. Keep the three
@@ -1444,10 +1444,44 @@ function Install-LlmOllama([switch]$Force) {
 # ===========================================================================
 # OPEN WEBUI
 # ===========================================================================
+# The uv Python request for Open WebUI's venv. On ARM64 it is an x64 Python,
+# run by Windows' built-in x64 emulation: every Open WebUI release pins a
+# package with no win_arm64 wheel (opencv-python-headless 4.13.0.92,
+# onnxruntime 1.23.2, ctranslate2), so none resolved natively on 2026-10-19.
+# Ollama stays native, so inference speed is unaffected.
 function Get-LlmPythonVersion {
-  # PyTorch publishes Windows-on-Arm wheels for Python 3.12 only.
-  if ($Script:Sys.Arch -eq 'arm64') { return '3.12' }
+  if ($Script:Sys.Arch -eq 'arm64') { return 'cpython-3.11-windows-x86_64-none' }
   return '3.11'
+}
+
+# True if the venv exists and was built from the Python this machine needs:
+# on ARM64 its pyvenv.cfg "home" must name an x64 Python. A 1.0.2 install on
+# ARM64 built a native 3.12 venv, which can no longer install Open WebUI.
+function Test-LlmVenvMatches {
+  if (-not (Test-Path -LiteralPath (Join-Path $Script:VenvDir 'Scripts\python.exe'))) { return $false }
+  $cfg = Join-Path $Script:VenvDir 'pyvenv.cfg'
+  if (-not (Test-Path -LiteralPath $cfg)) { return $false }
+  if ($Script:Sys.Arch -ne 'arm64') { return $true }
+  $homeLine = @(Get-Content -LiteralPath $cfg | Where-Object { $_ -match '^\s*home\s*=' })
+  return ($homeLine.Count -gt 0 -and $homeLine[0] -match 'x86_64')
+}
+
+# Creates the venv when there is none, and rebuilds one that doesn't match
+# (see Test-LlmVenvMatches). The folder holds programs only; Open WebUI's
+# data lives in its own folder under ProgramData. Returns $true if it
+# rebuilt an existing venv.
+function Initialize-LlmVenv {
+  if (Test-LlmVenvMatches) { return $false }
+  $rebuilt = $false
+  if (Test-Path -LiteralPath $Script:VenvDir) {
+    Write-LlmLog "Rebuilding the Open WebUI virtualenv with an x64 Python (Open WebUI no longer installs on native ARM64 Python). Your accounts and chats are not in it."
+    Remove-LlmPath $Script:VenvDir
+    $rebuilt = $true
+  }
+  $pv = Get-LlmPythonVersion
+  Write-LlmLog "Creating a Python virtualenv with uv ($pv)"
+  if ((Invoke-LlmUv @('venv', '--python', $pv, $Script:VenvDir)) -ne 0) { Stop-LlmStack 'uv could not create the virtualenv.' }
+  return $rebuilt
 }
 
 function Invoke-LlmUv([string[]]$Arguments) {
@@ -1479,11 +1513,7 @@ function Get-LlmQueryUrl { return "$($Script:Cfg.SearxngUrl.TrimEnd('/'))/search
 
 function Install-LlmWebUI {
   Install-LlmUv
-  if (-not (Test-Path -LiteralPath (Join-Path $Script:VenvDir 'Scripts\python.exe'))) {
-    $pv = Get-LlmPythonVersion
-    Write-LlmLog "Creating a Python $pv virtualenv with uv (Open WebUI supports 3.11-3.12 only)"
-    if ((Invoke-LlmUv @('venv', '--python', $pv, $Script:VenvDir)) -ne 0) { Stop-LlmStack 'uv could not create the virtualenv.' }
-  }
+  [void](Initialize-LlmVenv)
   Write-LlmLog 'Installing Open WebUI into the virtualenv. This is large and takes several minutes.'
   if (-not (Install-LlmWebUIPackages)) { Stop-LlmStack 'Installing Open WebUI failed; see the pip output above.' }
   New-LlmDirectory $Script:WebUIDataDir
@@ -2130,7 +2160,11 @@ function Invoke-LlmUpdate {
   Write-LlmLog 'Updating Ollama'
   try { Install-LlmOllama -Force } catch { Write-LlmWarn "The Ollama update failed ($_). Re-run the installer." }
   Write-LlmLog 'Updating Open WebUI in the virtualenv'
-  if (-not (Install-LlmWebUIPackages)) { Write-LlmWarn "The Open WebUI update failed. Data is safe at $backup. Restarting the existing version." }
+  $rebuilt = Initialize-LlmVenv
+  if (-not (Install-LlmWebUIPackages)) {
+    if ($rebuilt) { Write-LlmWarn "Installing Open WebUI into the rebuilt virtualenv failed. Data is safe at $backup. Re-run -Update." }
+    else { Write-LlmWarn "The Open WebUI update failed. Data is safe at $backup. Restarting the existing version." }
+  }
   if (Test-LlmService $Script:WebUIService) { Start-Service -Name $Script:WebUIService -ErrorAction SilentlyContinue }
   if ($Script:Cfg.SearxngMode -eq 'local' -and (Test-LlmDockerRunning)) {
     Write-LlmLog 'Updating the SearXNG image'

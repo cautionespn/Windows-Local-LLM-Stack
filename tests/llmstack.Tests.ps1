@@ -557,6 +557,74 @@ Write-Host 'AFTER THE PULL'
 }
 
 # ===========================================================================
+# 1.0.3: on ARM64, Open WebUI runs in an x64 Python under emulation.
+Describe 'Open WebUI virtualenv' {
+  BeforeEach {
+    function New-Venv([string]$HomeDir, [switch]$NoCfg, [switch]$NoPython) {
+      New-Item -ItemType Directory -Path (Join-Path $Script:VenvDir 'Scripts') -Force | Out-Null
+      if (-not $NoPython) { [IO.File]::WriteAllText((Join-Path $Script:VenvDir 'Scripts\python.exe'), 'x') }
+      if (-not $NoCfg) { [IO.File]::WriteAllText((Join-Path $Script:VenvDir 'pyvenv.cfg'), "home = $HomeDir`nimplementation = CPython`n") }
+      [IO.File]::WriteAllText((Join-Path $Script:VenvDir 'marker'), 'x')
+    }
+    $Script:UvCalls = New-Object System.Collections.Generic.List[string]
+    Mock Invoke-LlmUv {
+      param([string[]]$Arguments)
+      $Script:UvCalls.Add(($Arguments -join ' '))
+      New-Item -ItemType Directory -Path (Join-Path $Script:VenvDir 'Scripts') -Force | Out-Null
+      [IO.File]::WriteAllText((Join-Path $Script:VenvDir 'Scripts\python.exe'), 'x')
+      [IO.File]::WriteAllText((Join-Path $Script:VenvDir 'pyvenv.cfg'), "home = C:\py\cpython-3.11.14-windows-x86_64-none`n")
+      return 0
+    }
+  }
+  It 'asks uv for an x64 Python 3.11 on ARM64 and Python 3.11 on x64' {
+    $Script:Sys = @{ Arch = 'arm64' }
+    Get-LlmPythonVersion | Should -Be 'cpython-3.11-windows-x86_64-none'
+    $Script:Sys = @{ Arch = 'amd64' }
+    Get-LlmPythonVersion | Should -Be '3.11'
+  }
+  It 'on ARM64 only a venv built from an x64 Python matches' {
+    $Script:Sys = @{ Arch = 'arm64' }
+    New-Venv 'C:\py\cpython-3.12.12-windows-aarch64-none'
+    Test-LlmVenvMatches | Should -BeFalse
+    New-Venv 'C:\py\cpython-3.11.14-windows-x86_64-none'
+    Test-LlmVenvMatches | Should -BeTrue
+    $Script:Sys = @{ Arch = 'amd64' }
+    New-Venv 'C:\py\cpython-3.12.12-windows-aarch64-none'
+    Test-LlmVenvMatches | Should -BeTrue
+  }
+  It 'a venv with no pyvenv.cfg or no python.exe never matches' {
+    $Script:Sys = @{ Arch = 'amd64' }
+    New-Venv 'C:\py\x' -NoCfg
+    Test-LlmVenvMatches | Should -BeFalse
+    Remove-Item -LiteralPath $Script:VenvDir -Recurse -Force
+    New-Venv 'C:\py\x' -NoPython
+    Test-LlmVenvMatches | Should -BeFalse
+  }
+  It 'rebuilds a native ARM64 venv with an x64 Python' {
+    $Script:Sys = @{ Arch = 'arm64' }
+    New-Venv 'C:\py\cpython-3.12.12-windows-aarch64-none'
+    $out = Get-Out { $Script:Rebuilt = Initialize-LlmVenv }
+    $Script:Rebuilt | Should -BeTrue
+    Test-Path -LiteralPath (Join-Path $Script:VenvDir 'marker') | Should -BeFalse
+    $Script:UvCalls | Should -Contain "venv --python cpython-3.11-windows-x86_64-none $($Script:VenvDir)"
+    $out | Should -Match 'Rebuilding the Open WebUI virtualenv'
+    Test-LlmVenvMatches | Should -BeTrue
+  }
+  It 'leaves a matching venv alone and creates a missing one' {
+    $Script:Sys = @{ Arch = 'arm64' }
+    New-Venv 'C:\py\cpython-3.11.14-windows-x86_64-none'
+    Initialize-LlmVenv | Should -BeFalse
+    Test-Path -LiteralPath (Join-Path $Script:VenvDir 'marker') | Should -BeTrue
+    $Script:UvCalls.Count | Should -Be 0
+    Remove-Item -LiteralPath $Script:VenvDir -Recurse -Force
+    $out = Get-Out { $Script:Rebuilt = Initialize-LlmVenv }
+    $Script:Rebuilt | Should -BeFalse
+    $out | Should -Not -Match 'Rebuilding'
+    $Script:UvCalls.Count | Should -Be 1
+  }
+}
+
+# ===========================================================================
 Describe 'Catalogue refresh and validation' {
   It 'keeps order, comments dead rows in place, and suggests only as # REVIEW' {
     Set-Catalog @('# Last-Updated: 2026-01-01', '# Catalogue-Generation: 3.4.0', '# --- Daily ---', '32|qwen3.6:35b-a3b|23|moe|daily|yes|kept', '# --- Coding ---', '16|qwen3.6:14b|9|dense|coding|no|dead one')
