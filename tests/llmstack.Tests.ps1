@@ -73,6 +73,7 @@ BeforeEach {
   $Script:Ollama = @{ Models = @(); Stale = @(); PullFail = @(); Down = $false; Embed = @(); Calls = (New-Object System.Collections.Generic.List[string]) }
   $Script:Live = @()      # tags the fake registry serves; '*' means all
   $Script:RegDown = $false
+  $Script:ResumePauseS = 0  # resuming a cut-off pull never waits in tests
 
   Mock Get-LlmOsInfo { [pscustomobject]@{ Caption = 'Microsoft Windows 11 Pro'; Build = $Script:Hw.Build; ProductType = $Script:Hw.Product } }
   Mock Get-LlmArch { $Script:Hw.Arch }
@@ -485,6 +486,125 @@ Write-Host 'AFTER THE PULL'
 "@)
     $exe = (Get-Process -Id $PID).Path
     $out = & $exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $harness 2>&1 | Out-String
+    $out | Should -Match 'Pull interrupted\. TEST MESSAGE\.'
+    $out | Should -Not -Match 'AFTER THE PULL'
+  }
+  # 1.1.0: a cut-off pull resumes by itself while Ollama's saved progress grows.
+  It 'saved progress: finished blobs plus part Completed values, not the download itself' {
+    $blobs = Join-Path $Script:ModelsDir 'blobs'
+    New-Item -ItemType Directory -Path $blobs -Force | Out-Null
+    $h = 'sha256-' + ('a' * 64)
+    [IO.File]::WriteAllBytes((Join-Path $blobs $h), (New-Object byte[] 1000))
+    [IO.File]::WriteAllBytes((Join-Path $blobs "$h-partial"), (New-Object byte[] 5000))
+    [IO.File]::WriteAllText((Join-Path $blobs "$h-partial-0"), '{"N":0,"Offset":0,"Size":1000000000,"Completed":100}')
+    [IO.File]::WriteAllText((Join-Path $blobs "$h-partial-1"), '{"N":1,"Offset":1000000000,"Size":1000000000,"Completed":250}')
+    Get-LlmSavedBytes | Should -Be 1350
+  }
+  It 'saved progress is unknown with no blobs folder or a part file with no Completed' {
+    Get-LlmSavedBytes | Should -BeNullOrEmpty
+    $blobs = Join-Path $Script:ModelsDir 'blobs'
+    New-Item -ItemType Directory -Path $blobs -Force | Out-Null
+    Get-LlmSavedBytes | Should -Be 0
+    [IO.File]::WriteAllText((Join-Path $blobs ('sha256-' + ('b' * 64) + '-partial-0')), '{"N":0,"Offset":0}')
+    Get-LlmSavedBytes | Should -BeNullOrEmpty
+  }
+  It 'formats amounts as GB with one decimal, or whole MB, in any culture' {
+    $saved = [Threading.Thread]::CurrentThread.CurrentCulture
+    try {
+      [Threading.Thread]::CurrentThread.CurrentCulture = 'de-DE'
+      Format-LlmBytes 3.45e9 | Should -Be '3.5 GB'
+      Format-LlmBytes 350e6 | Should -Be '350 MB'
+    } finally { [Threading.Thread]::CurrentThread.CurrentCulture = $saved }
+  }
+  Context 'resuming a cut-off pull' {
+    # Each pull returns the next code and each measurement the next saved
+    # total; the last of each repeats.
+    BeforeEach {
+      $Script:Resume = @{ Codes = (New-Object System.Collections.Generic.Queue[object]); Saved = (New-Object System.Collections.Generic.Queue[object]); LastCode = 1; LastSaved = 0 }
+      function Set-Resume([object[]]$Codes, [object[]]$Saved) {
+        foreach ($c in $Codes) { $Script:Resume.Codes.Enqueue($c) }; $Script:Resume.LastCode = $Codes[-1]
+        foreach ($s in $Saved) { $Script:Resume.Saved.Enqueue($s) }; $Script:Resume.LastSaved = $Saved[-1]
+      }
+      function Get-Pulls([string]$Tag) { @($Script:Ollama.Calls | Where-Object { $_ -eq "pull $Tag" }).Count }
+      Mock Invoke-LlmNativeLive {
+        param([string[]]$Arguments)
+        $Script:Ollama.Calls.Add(($Arguments -join ' '))
+        if ($Script:Resume.Codes.Count -gt 0) { $Script:Resume.Codes.Dequeue() } else { $Script:Resume.LastCode }
+      }
+      Mock Get-LlmSavedBytes { if ($Script:Resume.Saved.Count -gt 0) { $Script:Resume.Saved.Dequeue() } else { $Script:Resume.LastSaved } }
+      $Script:Live = @('*')
+    }
+    It 'progress twice, then pulled' {
+      Set-Resume @(1, 1, 0) @(0, 100000000, 200000000)
+      $out = Get-Out { $Script:Code = Invoke-LlmResumingPull 'q:1' 'Pull interrupted. TEST.' }
+      $Script:Code | Should -Be 0
+      Get-Pulls 'q:1' | Should -Be 3
+      $out | Should -Match 'Attempt 1 was cut off; 100 MB more is saved\. Resuming in 0 s \(Ctrl-C stops\)\.'
+      $out | Should -Match 'Attempt 2 was cut off; 100 MB more is saved'
+      $out | Should -Not -Match 'Attempt 3|giving up|Giving up|interrupted'
+    }
+    It 'no progress: three attempts, then gives up' {
+      Set-Resume @(1) @(0)
+      $out = Get-Out { $Script:Code = Invoke-LlmResumingPull 'q:1' 'Pull interrupted. TEST.' }
+      $Script:Code | Should -Be 1
+      Get-Pulls 'q:1' | Should -Be 3
+      $out | Should -Match 'Attempt 2 was cut off and saved nothing new \(2 of 3 in a row\)'
+      $out | Should -Not -Match '3 of 3 in a row'
+      $out | Should -Match 'No progress in 3 attempts in a row; giving up on q:1 for now\.'
+    }
+    It 'growth resets the no-progress count' {
+      Set-Resume @(1) @(0, 0, 0, 300000000, 300000000)
+      $out = Get-Out { [void](Invoke-LlmResumingPull 'q:1' 'Pull interrupted. TEST.') }
+      Get-Pulls 'q:1' | Should -Be 6
+      $out | Should -Match 'Attempt 3 was cut off; 300 MB more is saved'
+      $out | Should -Match 'Attempt 5 was cut off and saved nothing new \(2 of 3 in a row\)'
+    }
+    It 'unreadable progress: ten attempts in all' {
+      Set-Resume @(1) @($null)
+      $out = Get-Out { $Script:Code = Invoke-LlmResumingPull 'q:1' 'Pull interrupted. TEST.' }
+      $Script:Code | Should -Be 1
+      Get-Pulls 'q:1' | Should -Be 10
+      $out | Should -Match "Attempt 9 of 10 was cut off \(saved progress can't be read here\)"
+      $out | Should -Not -Match 'Attempt 10 of 10'
+      $out | Should -Match 'Giving up on q:1 for now after 10 attempts\.'
+    }
+    It 'a tag the registry does not serve is never retried' {
+      $Script:Live = @()
+      Set-Resume @(1) @(0)
+      $out = Get-Out { [void](Invoke-LlmResumingPull 'q:1' 'Pull interrupted. TEST.') }
+      Get-Pulls 'q:1' | Should -Be 1
+      $out | Should -Not -Match 'Attempt 1'
+    }
+    It 'sync resumes a cut-off pick, lists it as pulled and goes on to the removals' {
+      $Script:Ollama.Models = @('llama3.3:70b')
+      Set-Resume @(1, 1, 0) @(0, 100000000, 200000000)
+      Set-Answers @('y', 'n', 'n', 'n', 'y')
+      $out = Get-Out { Invoke-LlmSync }
+      $out | Should -Not -Match 'THROWN'
+      Get-Pulls 'qwen3.6:35b-a3b' | Should -Be 3
+      $out | Should -Match 'Pulled:\s+qwen3\.6:35b-a3b'
+      $Script:Ollama.Calls | Should -Contain 'rm llama3.3:70b'
+    }
+  }
+  It 'resuming pull: a pipeline stop (Ctrl-C) during a pause prints the interrupted message and stops' {
+    # A real stop would end this Pester run, so it happens in a child
+    # PowerShell of the same edition that dot-sources the script.
+    $harness = Join-Path $TestDrive 'resume-stop-harness.ps1'
+    $script = Join-Path (Split-Path -Parent $PSScriptRoot) 'llmstack-windows.ps1'
+    [IO.File]::WriteAllText($harness, @"
+. '$($script.Replace("'", "''"))'
+`$Script:ResumePauseS = 0
+function Invoke-LlmNativeLive { 1 }
+function Get-LlmOllamaExe { 'ollama.exe' }
+function Get-LlmRegistryStatus { 'LIVE' }
+function Get-LlmSavedBytes { [long]0 }
+function Start-Sleep { throw (New-Object System.Management.Automation.PipelineStoppedException) }
+[void](Invoke-LlmResumingPull 'x:1' 'Pull interrupted. TEST MESSAGE.')
+Write-Host 'AFTER THE PULL'
+"@)
+    $exe = (Get-Process -Id $PID).Path
+    $out = & $exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $harness 2>&1 | Out-String
+    $out | Should -Match 'Attempt 1 was cut off'
     $out | Should -Match 'Pull interrupted\. TEST MESSAGE\.'
     $out | Should -Not -Match 'AFTER THE PULL'
   }

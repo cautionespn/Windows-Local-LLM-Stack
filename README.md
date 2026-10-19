@@ -211,10 +211,18 @@ Picks come from `C:\ProgramData\llmstack\models.catalog`, a text file you can ed
 1. It offers to replace a catalogue from an older generation, keeping a backup. Replacing it needs an elevated PowerShell; without one, the sync says so and carries on with your catalogue. Nothing else in the sync needs elevation.
 2. It lists the current picks and whether each is installed, current or **outdated**. Outdated means an older build than the registry serves; it is compared by manifest digest, with no download.
 3. It asks, one model at a time, which missing picks to pull and which outdated ones to update.
-4. It checks disk space, then pulls everything chosen.
+4. It checks disk space, then pulls everything chosen. A download that is cut off resumes by itself (see below).
 5. **Only if every pull succeeded**, it offers each installed model that isn't a current pick for removal, one at a time. It flags embedding models Open WebUI may use for documents.
 
 Every prompt defaults to no. If you press Ctrl-C during a download, it says the pull was interrupted and nothing was removed; re-running resumes the download.
+
+**When a download is cut off.** VPNs, proxies and security software sometimes reset long downloads. Ollama keeps what it has saved, so a pull can carry on where it stopped. When a pull fails and the registry still has the tag, `-SyncModels` checks how much Ollama saved, waits 10 seconds and pulls again. It keeps going while each attempt saves more, and gives up after 3 attempts in a row that save nothing. Each attempt prints one line, for example:
+
+```
+WARNING: Attempt 2 was cut off; 3.4 GB more is saved. Resuming in 10 s (Ctrl-C stops).
+```
+
+Ctrl-C, during a download or a pause, stops everything and removes nothing; running `-SyncModels` again carries on from what was saved. A tag the registry doesn't have is never retried. The check reads Ollama's own progress files in `%ProgramData%\llmstack\ollama\models\blobs`. If they can't be read, the script tries up to 10 times in all instead.
 
 ## Benchmarking
 
@@ -354,6 +362,11 @@ Invoke-ScriptAnalyzer -Path .\llmstack-windows.ps1 -Settings .\PSScriptAnalyzerS
 `PROMPT.md` is the full specification the script is built to, exported from the maintainer's spec set; don't edit it by hand. `LLMSTACK_DATA_DIR` and `LLMSTACK_PROGRAM_DIR` move the data and program folders. `LLMSTACK_ALLOW_SERVER=1` lets CI install on Windows Server.
 
 ## Changelog
+
+### v1.1.0
+- **`-SyncModels` resumes a cut-off download by itself.** When a pull fails and the registry still has the tag, the script measures what Ollama has saved, pauses 10 seconds and pulls again, printing how much the last attempt kept. It carries on while attempts keep saving more and gives up after 3 in a row that save nothing, or after 10 in all if Ollama's progress files can't be read. Ctrl-C during a pause stops everything with nothing removed, as during a download. The same change as MacOS-Local-LLM-Stack 3.7.0, found on a work laptop whose security software reset a 23 GB download after 5.9 GB.
+- **Tests:** 76 Pester tests (10 new): the progress reader against real files, the amount format in another culture, progress then success, no progress, a count reset by progress, unreadable progress, a missing tag, a sync that resumes and goes on to the removals, and Ctrl-C during a pause (in a child PowerShell). **Not verified:** a real download cut off by a proxy; the progress-file format was read from Ollama's source (`server/download.go`, 2026-10-19), not observed on a machine.
+- **`PROMPT.md`** updated from the maintainer's spec.
 
 ### v1.0.3
 - **Windows 11 ARM64 installs work again.** No Open WebUI release could be installed on ARM64 any more: each one requires a package with no Windows-on-Arm build (`opencv-python-headless`, `onnxruntime` or `ctranslate2`). Open WebUI now runs in an x64 Python 3.11 under Windows' built-in emulation; Ollama stays native. An existing ARM64 install's virtualenv (native Python 3.12) is rebuilt by the next install or `-Update`; accounts and chats live elsewhere and are not touched.

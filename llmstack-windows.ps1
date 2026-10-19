@@ -1,5 +1,5 @@
 <#
-llmstack-windows.ps1  v1.0.3
+llmstack-windows.ps1  v1.1.0
 
 A self-contained, private LLM stack for Windows 11.
 
@@ -87,7 +87,7 @@ if ($PSBoundParameters.ContainsKey('WebUIPort')) { $Script:Opt.WebUIPort = $WebU
 # Constants
 # ---------------------------------------------------------------------------
 $Script:ScriptName = 'llmstack-windows.ps1'
-$Script:ScriptVersion = '1.0.3'
+$Script:ScriptVersion = '1.1.0'
 $Script:CatalogDate = '2026-09-30'
 # Shared with the macOS and Ubuntu repositories: the MacOS-Local-LLM-Stack
 # version in which the built-in catalogue rows last changed. Keep the three
@@ -95,6 +95,19 @@ $Script:CatalogDate = '2026-09-30'
 $Script:CatalogGeneration = '3.4.0'
 $Script:CatalogWarnDays = 90
 $Script:CatalogStaleDays = 180
+
+# -SyncModels resumes a pull that was cut off (the registry still has the
+# tag) for as long as Ollama's saved progress grows. It stops after
+# ResumeStallLimit attempts in a row that save nothing, or after
+# ResumeBlindLimit attempts in all when progress can't be read.
+# LLMSTACK_RESUME_PAUSE (digits only) replaces the pause, for tests.
+$Script:ResumeStallLimit = 3
+$Script:ResumeBlindLimit = 10
+$Script:ResumePauseS = 10
+$resumePause = 0
+if ("$env:LLMSTACK_RESUME_PAUSE" -match '^[0-9]+$' -and [int]::TryParse("$env:LLMSTACK_RESUME_PAUSE", [ref]$resumePause)) {
+  $Script:ResumePauseS = $resumePause
+}
 
 # Dense-model speed gate, applied only when no discrete GPU sizes the picks:
 # tok/s ~= memory bandwidth / model size, and real runs reach about 65%.
@@ -1117,7 +1130,9 @@ MODES
                     which missing picks to pull and which installed picks to
                     update (older build than the registry's), pulls them, and
                     only then offers each other model for removal, one at a
-                    time. Every prompt defaults to no. Needs Ollama running.
+                    time. A download that is cut off resumes by itself
+                    while it keeps making progress. Every prompt defaults
+                    to no. Needs Ollama running.
     -Benchmark      Measure real generation speed (tok/s) and the CPU/GPU
                     split for each installed pick, or for -Model TAG.
     -Uninstall      Guided teardown; asks before removing each piece.
@@ -1776,6 +1791,92 @@ function Get-LlmRegistryManifestId([string]$Tag) {
   } finally { Remove-Item -LiteralPath $f -Force -ErrorAction SilentlyContinue }
 }
 
+# --- Resuming a cut-off pull ----------------------------------------------
+# Ollama downloads a model file in parts of up to 1 GB, 16 at a time. A reset
+# connection loses that part's bytes since its last save, and a part is saved
+# only when its connection ends cleanly or the pull stops. So a re-run
+# resumes, but how much each attempt keeps varies: 5.9 GB on MBP5800 behind
+# Zscaler on 2026-10-19, about 45 MB a connection on 2026-10-05. Measuring
+# what Ollama saved tells a slow but working link from a blocked one.
+
+# Bytes Ollama has saved in the store, or $null when that can't be read.
+# Ollama's internal format, checked against server/download.go on 2026-10-19:
+#   sha256-<64 hex>              a finished blob: count its size
+#   sha256-<hex>-partial         the sparse download itself: not counted
+#   sha256-<hex>-partial-<n>     one part, JSON with Completed = bytes saved
+function Get-LlmSavedBytes {
+  $dir = [IO.Path]::Combine($Script:ModelsDir, 'blobs')
+  try {
+    if (-not (Test-Path -LiteralPath $dir -PathType Container)) { return $null }
+    $sum = [long]0
+    foreach ($f in @(Get-ChildItem -LiteralPath $dir -File -ErrorAction Stop)) {
+      if ($f.Name -cmatch '^sha256-[0-9a-f]{64}$') {
+        $sum += [long]$f.Length
+      } elseif ($f.Name -cmatch '^sha256-[0-9a-f]+-partial-[0-9]+$') {
+        $part = [IO.File]::ReadAllText($f.FullName) | ConvertFrom-Json -ErrorAction Stop
+        $done = "$($part.Completed)"
+        if ($done -notmatch '^[0-9]+$') { return $null }
+        $sum += [long]$done
+      }
+    }
+    return $sum
+  } catch {
+    return $null
+  }
+}
+
+# "1.4 GB" (10^9 bytes), or "350 MB" under 1 GB; culture-invariant.
+function Format-LlmBytes([double]$Bytes) {
+  if ($Bytes -ge 1e9) { return (($Bytes / 1e9).ToString('0.0', [Globalization.CultureInfo]::InvariantCulture) + ' GB') }
+  return ([Math]::Floor($Bytes / 1e6).ToString([Globalization.CultureInfo]::InvariantCulture) + ' MB')
+}
+
+# Pulls one model, resuming by itself after a cut-off (shared sync contract,
+# step 7), and returns 0 or the last exit code. Only a 200 from the registry
+# means the download was cut off; a missing tag or a dead network won't
+# recover by retrying. The whole loop, pauses included, sits in the same
+# guard as Invoke-LlmGuardedPull, so Ctrl-C during a pause prints the
+# message too.
+function Invoke-LlmResumingPull([string]$Tag, [string]$InterruptMessage) {
+  $done = $false; $failed = $false
+  try {
+    $n = 0; $stall = 0
+    $before = Get-LlmSavedBytes
+    while ($true) {
+      $n++
+      $code = Invoke-LlmNativeLive (Get-LlmOllamaExe) @('pull', $Tag)
+      if ($code -eq 0) { $done = $true; return 0 }
+      if ((Get-LlmRegistryStatus $Tag) -ne 'LIVE') { $done = $true; return $code }
+      $after = Get-LlmSavedBytes
+      $pause = "Resuming in $($Script:ResumePauseS) s (Ctrl-C stops)."
+      if ($null -eq $before -or $null -eq $after) {
+        if ($n -ge $Script:ResumeBlindLimit) {
+          Write-LlmWarn "Giving up on $Tag for now after $($Script:ResumeBlindLimit) attempts."
+          $done = $true; return $code
+        }
+        Write-LlmWarn "Attempt $n of $($Script:ResumeBlindLimit) was cut off (saved progress can't be read here). $pause"
+      } elseif ($after -gt $before) {
+        $stall = 0
+        Write-LlmWarn "Attempt $n was cut off; $(Format-LlmBytes ($after - $before)) more is saved. $pause"
+      } else {
+        $stall++
+        if ($stall -ge $Script:ResumeStallLimit) {
+          Write-LlmWarn "No progress in $($Script:ResumeStallLimit) attempts in a row; giving up on $Tag for now."
+          $done = $true; return $code
+        }
+        Write-LlmWarn "Attempt $n was cut off and saved nothing new ($stall of $($Script:ResumeStallLimit) in a row). $pause"
+      }
+      $before = $after
+      Start-Sleep -Seconds $Script:ResumePauseS
+    }
+  } catch {
+    $failed = $true
+    throw
+  } finally {
+    if (-not $done -and -not $failed) { Write-LlmWarn $InterruptMessage }
+  }
+}
+
 # Why each failed pull failed. Ollama's error does not tell a missing tag
 # from a dropped connection, so probe each manifest once: a tag the registry
 # serves means the download itself was cut off. On MBP5800 (2026-10-05)
@@ -1913,11 +2014,12 @@ function Invoke-LlmSync {
     }
   }
 
-  # 6. Pull everything chosen before removing anything.
+  # 6. Pull everything chosen before removing anything. A cut-off pull
+  # resumes by itself while Ollama's saved progress grows.
   $pulled = @(); $updated = @(); $failed = @(); $removed = @(); $kept = @()
   foreach ($s in $sel) {
     Write-LlmLog "Pulling $($s.Tag) (about $($s.Size) GB). Large downloads take a while."
-    $code = Invoke-LlmGuardedPull $s.Tag 'Pull interrupted. Nothing was removed. Re-run to resume the download.'
+    $code = Invoke-LlmResumingPull $s.Tag 'Pull interrupted. Nothing was removed. Re-run to resume the download.'
     if ($code -eq 0) {
       if ($s.Kind -eq 'update') { $updated += $s.Tag } else { $pulled += $s.Tag }
       Write-LlmOk "Pulled $($s.Tag)"

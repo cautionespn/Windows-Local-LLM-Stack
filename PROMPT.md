@@ -12,7 +12,7 @@
 > private meta repository. The rules they share with this spec are copied
 > in below; the rest are the maintainer's working notes.
 
-# 30 — Rebuild spec: Windows-Local-LLM-Stack (`llmstack-windows.ps1` v1.0.2)
+# 30 — Rebuild spec: Windows-Local-LLM-Stack (`llmstack-windows.ps1` v1.1.0)
 
 **Use this prompt to rebuild the repository from an empty folder, or to change it.**
 - Give the whole file to Claude with the instruction: *"Build (or update) the repository described here. Follow it exactly; where it is silent, ask."*
@@ -35,9 +35,9 @@
 | | |
 |---|---|
 | Repository | `cautionespn/Windows-Local-LLM-Stack` (public, GPL v3) |
-| Current version | 1.0.2 (2026-10-08), tag `1.0.2` |
+| Current version | 1.1.0 (2026-10-19), tag `1.1.0` |
 | Catalogue generation | 3.4.0 |
-| Verified on | CI: real install, re-run, declining Docker Desktop, restart, benchmark, sync and uninstall on **Windows 11 Enterprise ARM64** (build 26200, `windows-11-arm`) and **Windows Server 2025 x64** (`windows-latest`, plus update); 66 Pester tests on 5.1 and 7 |
+| Verified on | CI: real install, re-run, declining Docker Desktop, restart, benchmark, sync and uninstall on **Windows 11 Enterprise ARM64** (build 26200, `windows-11-arm`) and **Windows Server 2025 x64** (`windows-latest`, plus update); 76 Pester tests on 5.1 and 7 |
 | Not verified | local SearXNG in Docker Desktop and the Docker Desktop install (hosted Windows runners cannot run Linux containers), real GPU hardware, Windows 11 x64 (no hosted runner) |
 
 ---
@@ -296,7 +296,7 @@ A virtual account exists only once its service does, so set the ACLs after creat
 18. Wait up to 420 s for Open WebUI.
 19. The summary, with the sign-in note in local mode.
 
-**`Invoke-LlmGuardedPull -Tag <t> -InterruptMessage <m>`** runs `ollama pull` through `Invoke-LlmNativeLive` and returns its exit code. It wraps the call in `try { ...; $done = $true } catch { $failed = $true; throw } finally { if (-not $done -and -not $failed) { Write-LlmWarn $m } }`. A pipeline stop (Ctrl-C) skips `catch` and runs `finally`, so only an interruption prints the message; an ordinary error is rethrown silently. `-SyncModels` uses it with the shared message.
+**`Invoke-LlmGuardedPull -Tag <t> -InterruptMessage <m>`** runs `ollama pull` through `Invoke-LlmNativeLive` and returns its exit code. It wraps the call in `try { ...; $done = $true } catch { $failed = $true; throw } finally { if (-not $done -and -not $failed) { Write-LlmWarn $m } }`. A pipeline stop (Ctrl-C) skips `catch` and runs `finally`, so only an interruption prints the message; an ordinary error is rethrown silently. The install uses it; `-SyncModels` uses `Invoke-LlmResumingPull` (see the sync section) with the shared message.
 
 **`-Update`:**
 - Stop Open WebUI and back up the data.
@@ -351,7 +351,16 @@ This mode brings installed models in line with the current picks. **The safety p
 6. **Disk check.** Updates count at full size. If free disk is less than the chosen sizes plus 10 GB:
    - Warn, and say "Nothing was changed. To free space first, run --sync-models again, decline every pull, and answer yes to the removals you want."
    - Exit 1.
-7. **Pull** everything chosen. On Ctrl-C during a pull, say "Pull interrupted. Nothing was removed. Re-run to resume the download." and stop: bash traps `INT`; PowerShell, where a stop skips `catch` but runs `finally`, prints it from a `finally` guarded by "not done and no ordinary error". If any pull fails, list the failures, say "no models were removed", and exit 1.
+7. **Pull** everything chosen. On Ctrl-C during a pull or a resume pause, say "Pull interrupted. Nothing was removed. Re-run to resume the download." and stop: bash traps `INT`; PowerShell, where a stop skips `catch` but runs `finally`, prints it from a `finally` guarded by "not done and no ordinary error", around the whole resume loop. If any pull fails, list the failures, say "no models were removed", and exit 1.
+
+   **Resume a cut-off pull.** When a pull fails, probe its tag's manifest once with the registry check. Only a 200 means the download was cut off; then pull the tag again automatically, measuring how much Ollama has saved between attempts. Any other answer stops resuming that tag at once.
+   - **Saved progress** is read from the `blobs` folder of the platform's model store; each spec names the store and how it is read. It is the sizes of finished blob files (`sha256-` and 64 hex digits, no suffix) plus the `Completed` values in Ollama's part files (`sha256-<64 hex>-partial-<n>`, one JSON object each). Ollama discards the bytes of a reset connection and saves a part's progress only when its connection ends cleanly or the pull stops, so this is exactly what the next attempt keeps. It is Ollama's internal format, not an API (checked against `server/download.go` on main, 2026-10-19). If the folder is missing or can't be read, or a part file has no `Completed` number, progress is **unknown**.
+   - Measure before the first attempt and after each failed one, then print one line and pause before the next attempt. Amounts are `<x.x> GB` (10^9 bytes), or `<n> MB` under 1 GB:
+     - progress grew: "Attempt <n> was cut off; <amount> more is saved. Resuming in <pause> s (Ctrl-C stops)."
+     - no growth: "Attempt <n> was cut off and saved nothing new (<k> of 3 in a row). Resuming in <pause> s (Ctrl-C stops)." On the third such attempt in a row, print "No progress in 3 attempts in a row; giving up on <tag> for now." instead, and stop. Growth resets the count.
+     - unknown (before or after the attempt): "Attempt <n> of 10 was cut off (saved progress can't be read here). Resuming in <pause> s (Ctrl-C stops)." On the tenth attempt, print "Giving up on <tag> for now after 10 attempts." instead, and stop.
+   - A tag that stops resuming is a failed pull. There is no cap while progress grows; the download's size bounds it.
+   - Constants: `RESUME_STALL_LIMIT=3`, `RESUME_BLIND_LIMIT=10`, `RESUME_PAUSE_S=10` (PowerShell: `$Script:ResumeStallLimit`, `$Script:ResumeBlindLimit`, `$Script:ResumePauseS`). Test hook: `LLMSTACK_RESUME_PAUSE=<seconds>` replaces the pause when it is all digits; anything else is ignored. It is not in the help.
 
    **Say why each pull failed.** Ollama's own error does not tell a missing tag from a dropped connection, so probe each failed tag's manifest once with the registry check (the same endpoint and timeout) and print it with a reason:
    - 200: `download failed (the tag is in the registry)`
@@ -372,6 +381,12 @@ This mode brings installed models in line with the current picks. **The safety p
 
 When stdin is a list of answers, as in tests, loops that prompt must not consume that list. In bash, iterate over fd 3.
 <!-- /SHARED:sync -->
+
+**Resuming on Windows.** The store is `$Script:ModelsDir` (`%ProgramData%\llmstack\ollama\models`), read directly.
+- `Get-LlmSavedBytes` reads its `blobs` folder with `Get-ChildItem -LiteralPath -File`. Finished blobs count by `Length`; part files go through `ConvertFrom-Json` and count by `Completed`. It returns a `[long]`, or `$null` when progress is unknown: a missing folder, an access error, or a part file with no numeric `Completed`.
+- `Invoke-LlmResumingPull -Tag <t> -InterruptMessage <m>` runs the attempts with `Invoke-LlmNativeLive` and `Start-Sleep`, and returns 0 or the last exit code. The whole loop sits inside the same `try`/`catch`/`finally` guard as `Invoke-LlmGuardedPull`, so Ctrl-C during a pause prints the message too.
+- `-SyncModels` uses `Invoke-LlmResumingPull`. The install's single pull keeps `Invoke-LlmGuardedPull`.
+- `Format-LlmBytes` formats an amount as the contract says.
 
 <!-- SHARED:registry -->
 ### Registry checks and catalogue maintenance (shared contract)
@@ -680,12 +695,19 @@ Job timeouts: lint 10 min, unit 15, catalogue 5, end-to-end 75. The sync and uni
 
 - **1.0.2 additions:** a failed sync pull names its cause: a live tag says the download failed, gives the VPN/proxy hint and never says "Check the tag"; a missing tag says so and points at the library; an unreachable registry says so.
 
-Total: 66 tests (63 in 1.0.1, 54 in 1.0.0).
+- **1.1.0 additions:**
+  - `Get-LlmSavedBytes` against real files under `$TestDrive`: finished blobs plus part `Completed` values; the main `-partial` file is not counted; a part file with no `Completed` gives `$null`; a missing folder gives `$null`; an empty folder gives 0.
+  - `Format-LlmBytes` under `de-DE`: `3.5 GB` and `350 MB`.
+  - `Invoke-LlmResumingPull` with `$Script:ResumePauseS = 0` (set in `BeforeEach`), mocking `Invoke-LlmNativeLive` and `Get-LlmSavedBytes` with queued results, and the registry through the existing `Get-LlmHttpStatus` mock: progress twice then success (three pulls, returns 0); no progress (three pulls, the give-up line); growth resets the count (six pulls); unknown progress (ten pulls, "Attempt 9 of 10"); a 404 (one pull, no "Attempt" line); and `Invoke-LlmSync` resuming a pick, listing it under Pulled and going on to the removals.
+  - A pipeline stop during the pause, run in a child PowerShell that overrides `Start-Sleep` to throw `PipelineStoppedException`, prints the interrupted message.
+
+Total: 76 tests (66 in 1.0.2, 63 in 1.0.1, 54 in 1.0.0).
 
 ## Appendix — Version history
 
 | Version | Change |
 |---|---|
+| 1.1.0 (2026-10-19) | `-SyncModels` resumes a cut-off pull by itself while Ollama's saved progress grows; it stops after 3 attempts in a row with none, or after 10 when progress can't be read |
 | 1.0.2 (2026-10-08) | `-SyncModels` says why each pull failed (live tag: download cut off; missing tag; registry unreachable) instead of always suggesting the tag |
 | 1.0.1 (2026-10-01) | Ctrl-C during pulls prints the interrupted message (backlog 4b); declining Docker Desktop turns web search off before Open WebUI is configured (4c); ports validated when given, in every mode (4d); `-SyncModels` needs no elevation and explains instead of failing when a catalogue replacement would need it (4e); `PROMPT.md` exported from this spec |
 | 1.0.0 (2026-09-30) | First version; PR #1 merged as `ef5b4b3`. CI fixes before merge: root `BeforeEach`; analyzer per file; failures as annotations; arm64 job made required; LF-only built-in catalogue; `Get-LlmVramBytes`; the prompt mock prints its question |
