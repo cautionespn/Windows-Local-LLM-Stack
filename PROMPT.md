@@ -37,7 +37,7 @@
 | Repository | `cautionespn/Windows-Local-LLM-Stack` (public, GPL v3) |
 | Current version | 1.1.0 (2026-10-19), tag `1.1.0` |
 | Catalogue generation | 3.4.0 |
-| Verified on | CI: real install, re-run, declining Docker Desktop, restart, benchmark, sync and uninstall on **Windows 11 Enterprise ARM64** (build 26200, `windows-11-arm`) and **Windows Server 2025 x64** (`windows-latest`, plus update); 78 Pester tests on 5.1 and 7 |
+| Verified on | CI: real install, re-run, declining Docker Desktop, restart, benchmark, sync and uninstall on **Windows 11 Enterprise ARM64** (build 26200, `windows-11-arm`) and **Windows Server 2025 x64** (`windows-latest`, plus update); 83 Pester tests on 5.1 and 7 |
 | Not verified | local SearXNG in Docker Desktop and the Docker Desktop install (hosted Windows runners cannot run Linux containers), real GPU hardware, Windows 11 x64 (no hosted runner) |
 
 ---
@@ -101,7 +101,7 @@ The deliverables are:
 | Component | How it runs |
 |---|---|
 | Ollama | Windows service `llmstack-ollama`, wrapped by **shawl**, virtual account `NT SERVICE\llmstack-ollama` |
-| Open WebUI | Windows service `llmstack-openwebui` via shawl, virtual account `NT SERVICE\llmstack-openwebui`, uv-managed venv (Python **3.11 on amd64, 3.12 on arm64**: PyTorch's Windows-on-Arm wheels need 3.12) |
+| Open WebUI | Windows service `llmstack-openwebui` via shawl, virtual account `NT SERVICE\llmstack-openwebui`, uv-managed venv, Python **3.11 x64 on both architectures**. On ARM64 it runs under Windows' built-in x64 emulation, because Open WebUI pins packages with no `win_arm64` wheels (`opencv-python-headless`, `onnxruntime`, `ctranslate2`; every release failed to resolve on 2026-10-19). Ollama stays native ARM64, so inference speed is unaffected |
 | SearXNG | **Docker Desktop** container: runs only after someone signs in. Or remote (`-SearxngUrl`), or off (`-NoWebSearch`) |
 | shawl v1.9.0 | `shawl-v1.9.0-win64.zip` from GitHub (x64; runs under emulation on ARM64) |
 | uv | latest `uv-x86_64-pc-windows-msvc.zip` / `uv-aarch64-pc-windows-msvc.zip` |
@@ -152,7 +152,9 @@ The deliverables are:
 **Open WebUI.**
 - uv runs with `UV_PYTHON_INSTALL_DIR=%ProgramFiles%\llmstack\python`, `UV_CACHE_DIR=%ProgramData%\llmstack\uv-cache`, `UV_PYTHON_PREFERENCE=only-managed` and `UV_NO_PROGRESS=1`.
 - Steps:
-  1. `uv venv --python <3.11|3.12> %ProgramFiles%\llmstack\openwebui-venv`
+  1. `uv venv --python <request> %ProgramFiles%\llmstack\openwebui-venv`. `Get-LlmPythonVersion` returns the request: `3.11` on amd64, `cpython-3.11-windows-x86_64-none` on arm64.
+     - `Test-LlmVenvMatches` reads the venv's `pyvenv.cfg`. On arm64 the `home` line must name an x64 Python (`x86_64`); on amd64 any venv matches. A missing `python.exe` or `pyvenv.cfg` never matches.
+     - Install and `-Update` both call `Initialize-LlmVenv`. It creates the venv when there is none. When the venv doesn't match, as with a 1.0.2 native-ARM64 venv, it says so, removes the folder and creates it again. The folder holds programs only; Open WebUI's data lives in `%ProgramData%\llmstack\open-webui`.
   2. `uv pip install --python <venv>\Scripts\python.exe --upgrade torch --index-url https://download.pytorch.org/whl/cpu`
   3. `--upgrade-package open-webui open-webui`
 
@@ -301,7 +303,7 @@ A virtual account exists only once its service does, so set the ACLs after creat
 **`-Update`:**
 - Stop Open WebUI and back up the data.
 - Force Ollama.
-- Upgrade the packages, then start the service even if the upgrade failed.
+- `Initialize-LlmVenv` (a mismatched venv is rebuilt), then upgrade the packages, then start the service even if the upgrade failed.
 - Docker Desktop running: `compose pull` and `up -d`.
 - Wait 300 s.
 - Report the catalogue age, run `-CheckModels`, and print the daily pick.
@@ -695,6 +697,7 @@ Job timeouts: lint 10 min, unit 15, catalogue 5, end-to-end 75. The sync and uni
 
 - **1.0.2 additions:** a failed sync pull names its cause: a live tag says the download failed, gives the VPN/proxy hint and never says "Check the tag"; a missing tag says so and points at the library; an unreachable registry says so.
 
+- **1.0.3 additions:** `Get-LlmPythonVersion` per architecture; `Test-LlmVenvMatches` against `pyvenv.cfg` files under `$TestDrive` (arm64 with an `aarch64` home: no; with an `x86_64` home: yes; amd64: yes; no `pyvenv.cfg`: no); `Initialize-LlmVenv` rebuilds a mismatched venv and leaves a matching one alone (uv mocked).
 - **1.1.0 additions:**
   - `Get-LlmSavedBytes` against real files under `$TestDrive`: finished blobs plus part `Completed` values; the main `-partial` file is not counted; a part file with no `Completed` gives `$null`; a missing folder gives `$null`; an empty folder gives 0.
   - `Format-LlmBytes` under `de-DE`: `3.5 GB` and `350 MB`.
@@ -702,13 +705,14 @@ Job timeouts: lint 10 min, unit 15, catalogue 5, end-to-end 75. The sync and uni
   - `LLMSTACK_RESUME_PAUSE="5`n"` is ignored (a child PowerShell prints a pause of 10).
   - A pipeline stop during the pause, run in a child PowerShell that overrides `Start-Sleep` to throw `PipelineStoppedException`, prints the interrupted message.
 
-Total: 78 tests (66 in 1.0.2, 63 in 1.0.1, 54 in 1.0.0).
+Total: 83 tests (71 in 1.0.3, 66 in 1.0.2, 63 in 1.0.1, 54 in 1.0.0).
 
 ## Appendix — Version history
 
 | Version | Change |
 |---|---|
 | 1.1.0 (2026-10-19) | `-SyncModels` resumes a cut-off pull by itself while Ollama's saved progress grows; it stops after 3 attempts in a row with none, or after 10 when progress can't be read |
+| 1.0.3 (2026-10-19) | Windows 11 ARM64: Open WebUI runs in an x64 Python under emulation, because no Open WebUI release resolves on `win_arm64` any more; an existing native-ARM64 venv is rebuilt on install or `-Update` |
 | 1.0.2 (2026-10-08) | `-SyncModels` says why each pull failed (live tag: download cut off; missing tag; registry unreachable) instead of always suggesting the tag |
 | 1.0.1 (2026-10-01) | Ctrl-C during pulls prints the interrupted message (backlog 4b); declining Docker Desktop turns web search off before Open WebUI is configured (4c); ports validated when given, in every mode (4d); `-SyncModels` needs no elevation and explains instead of failing when a catalogue replacement would need it (4e); `PROMPT.md` exported from this spec |
 | 1.0.0 (2026-09-30) | First version; PR #1 merged as `ef5b4b3`. CI fixes before merge: root `BeforeEach`; analyzer per file; failures as annotations; arm64 job made required; LF-only built-in catalogue; `Get-LlmVramBytes`; the prompt mock prints its question |
