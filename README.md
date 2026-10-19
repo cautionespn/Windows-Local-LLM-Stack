@@ -61,6 +61,7 @@ It also:
 ## Requirements
 
 - **Windows 11**, x64 or ARM64. Home, Pro, Enterprise and Education all work; Windows 10 and Server are refused.
+  - On ARM64, Open WebUI runs in an x64 Python under Windows' built-in x64 emulation, because its dependencies publish no Windows-on-Arm packages. Ollama runs natively, so model speed is unaffected; only the web interface is emulated.
 - **Windows PowerShell 5.1**, which every Windows 11 PC has, or PowerShell 7.
 - **An elevated PowerShell** for install, update, uninstall and sync. `-Recommend`, `-Status` and `-Benchmark` don't need one.
 - **Internet access** during install.
@@ -353,6 +354,10 @@ Invoke-ScriptAnalyzer -Path .\llmstack-windows.ps1 -Settings .\PSScriptAnalyzerS
 `PROMPT.md` is the full specification the script is built to, exported from the maintainer's spec set; don't edit it by hand. `LLMSTACK_DATA_DIR` and `LLMSTACK_PROGRAM_DIR` move the data and program folders. `LLMSTACK_ALLOW_SERVER=1` lets CI install on Windows Server.
 
 ## Changelog
+
+### v1.0.3
+- **Windows 11 ARM64 installs work again.** No Open WebUI release could be installed on ARM64 any more: each one requires a package with no Windows-on-Arm build (`opencv-python-headless`, `onnxruntime` or `ctranslate2`). Open WebUI now runs in an x64 Python 3.11 under Windows' built-in emulation; Ollama stays native. An existing ARM64 install's virtualenv (native Python 3.12) is rebuilt by the next install or `-Update`; accounts and chats live elsewhere and are not touched.
+- **Tests:** 71 Pester tests (5 new) for the Python choice, the virtualenv check and the rebuild. The end-to-end job on GitHub's Windows 11 ARM64 runner installs, re-runs, restarts, syncs, benchmarks and uninstalls with the x64 Python.
 
 ### v1.0.2
 - **A failed `-SyncModels` pull now says why.** The script checks each failed tag against the Ollama registry. If the registry has the tag, it reports that the download itself was cut off and suggests a VPN, proxy or security software that may be resetting long downloads; downloaded parts are kept, so re-running resumes them. If the tag is missing it points at the Ollama library, and if the registry does not answer it says so. Previously every failure said "Check the tag", even when the tag was fine and a corporate security tool was dropping the connection. Tested against a stub registry in CI; not yet reproduced end to end on a machine behind an intercepting proxy.
